@@ -1,0 +1,36 @@
+# Module 1 — FOV Mapping Configuration
+# Purpose: Locate the 10x Live FOV inside the 3x3 tiled 20x Hyb4 image.
+# The 10x FOV is approximately (but not exactly) centered in the 20x tiled image.
+#
+# Matching channel: DAPI (not BF)
+# Rationale: BF images at 10x and 20x are nearly uniform (contrast <9%) and lack
+# structural features needed for template matching. DAPI nuclear staining produces
+# a sparse, high-contrast point pattern that is structurally recognizable across
+# magnifications after 2x upscaling.
+
+input:
+  live_dapi_path: "IMAGES/B7-FOVB--t1118--C00.tif"         # 10x Live DAPI (uint16, 12-bit, C0)
+  hyb4_icc_path: "IMAGES/20260123_psy_redo_3 hyb4_B7-20X-3X3-14Z-FOVB_ICC_Processed001.tif"
+
+processing:
+  pixel_ratio: 2.0          # 10x → 20x pixel size ratio (same camera, confirmed 2:1)
+  live_bit_depth: 12        # ADC bit depth of Live images (normalize by 4095)
+  hyb4_bit_depth: 16        # ADC bit depth of Hyb4 ICC_Processed (normalize by 65535)
+
+  # Percentile clipping for DAPI: use higher value to preserve nuclear signal peaks
+  # DAPI is sparse — we want bright nuclei to dominate the template feature map
+  clip_percentile: 99.9     # clip only extreme outliers; preserve nuclear intensity peaks
+
+  # Channel indices in ICC_Processed Z-axis (FIJI export format: C=1, Z=5 = channels)
+  hyb4_channels:
+    DAPI:  0
+    Ch2_AF590: 1
+    Ch3_AF488: 2
+    Ch1_AF647: 3
+    BF:    4
+
+output:
+  results_dir: "python_results/module1"
+  crop_coords_filename: "crop_coords.json"   # saves y0, x0, crop_h, crop_w
+  save_cropped_channels: true                # save each cropped channel as .npy
+  cropped_channel_prefix: "hyb4_crop_"      # e.g. hyb4_crop_DAPI.npy, hyb4_crop_BF.npy
