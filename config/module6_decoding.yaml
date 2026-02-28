@@ -1,0 +1,43 @@
+# Module 6 — Barcode Decoding Configuration
+# Purpose: For each nucleus and each hybridization round, assign a color
+#          (AF647=Purple, AF590=Blue, AF488=Yellow) by taking the argmax of
+#          the three channel intensities, subject to a background threshold.
+#          The three-round color sequence is the cell's barcode.
+#
+# Decoding strategy (Method X):
+#   For each nucleus per round:
+#     1. Look up max intensities for Ch1_AF647, Ch2_AF590, Ch3_AF488
+#     2. If max(all channels) < background_threshold → assign None (no signal)
+#     3. Otherwise → argmax channel → color label
+#   The barcode is: (color_hyb2, color_hyb3, color_hyb4)
+#
+# Color mapping (Psychedelics project):
+#   AF647 (Ch1) → Purple
+#   AF590 (Ch2) → Blue
+#   AF488 (Ch3) → Yellow
+#   None         → Gray (no signal / below threshold)
+#
+# Background threshold:
+#   Set conservatively. Inspect the M5 QC violin plots to find the valley
+#   between background and signal distributions. A good starting point is
+#   3-5× the mean background intensity of non-signal channels.
+#   If unsure, set to 0 to keep all calls, then filter in downstream analysis.
+
+input:
+  intensity_path:    "python_results/module5/spot_intensities.csv"  # M5 output
+  nucleus_props_path: "python_results/module4/nucleus_properties.csv"  # M4 centroids
+
+processing:
+  background_threshold: 2000   # raw ADU; nuclei where max(channels) < threshold → None
+                                # Adjust based on M5 QC violin plot
+
+  # Color labels
+  color_map:
+    Ch1_AF647: "Purple"
+    Ch2_AF590: "Blue"
+    Ch3_AF488: "Yellow"
+  no_signal_label: "None"
+
+output:
+  results_dir:       "python_results/module6"
+  barcode_filename:  "barcodes.csv"     # per nucleus: id, centroid, barcode, hyb2/3/4 colors
