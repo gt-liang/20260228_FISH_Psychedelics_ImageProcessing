@@ -29,6 +29,7 @@ import json
 import time
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from aicsimageio import AICSImage
@@ -268,7 +269,94 @@ class FOVMapper:
         return cropped_channels
 
     # ------------------------------------------------------------------
-    # Step 6: Save crop coordinates
+    # Step 6: Overlay visualization (QC)
+    # ------------------------------------------------------------------
+    def visualize_result(self, template: np.ndarray, hyb4_arr: np.ndarray,
+                         crop_info: dict):
+        """
+        Generate a 3-panel QC figure:
+          Left   — Live DAPI upscaled to 20x resolution
+          Center — Hyb4 DAPI crop (same spatial region)
+          Right  — Magenta/Green overlay (Live=magenta, Hyb4=green)
+                   Good alignment → nuclei appear white/yellow
+                   Misalignment  → nuclei appear red or green separately
+
+        Images are downsampled 4x for display (large arrays → manageable figure).
+
+        Scientific note: The overlay uses a two-colour scheme standard in
+        microscopy QC (e.g., ImageJ "Merge Channels"). If nuclei appear
+        white/grey in the overlay, the spatial registration is correct.
+        If they appear separately coloured, there is a systematic offset
+        that should be investigated before proceeding to Module 2.
+        """
+        logger.info("[M1 Step 6] Generating overlay visualization")
+
+        dapi_z_idx = self.cfg["processing"]["hyb4_channels"]["DAPI"]
+        bit_depth_hyb4 = self.cfg["processing"]["hyb4_bit_depth"]
+        clip_pct = self.cfg["processing"]["clip_percentile"]
+
+        y0, x0 = crop_info["y0"], crop_info["x0"]
+        crop_h, crop_w = crop_info["crop_h"], crop_info["crop_w"]
+
+        # --- Prepare Live DAPI (template already normalized [0,1]) ---
+        live_norm = template  # (crop_h, crop_w), float32 [0,1]
+
+        # --- Prepare Hyb4 DAPI crop, normalized to [0,1] ---
+        hyb4_dapi_raw = hyb4_arr[dapi_z_idx, y0:y0+crop_h, x0:x0+crop_w].astype(np.float32)
+        clip_val = np.percentile(hyb4_dapi_raw, clip_pct)
+        hyb4_norm = np.clip(hyb4_dapi_raw, 0, clip_val) / (2**bit_depth_hyb4 - 1)
+
+        # --- Downsample 4x for display ---
+        ds = 4
+        live_ds = live_norm[::ds, ::ds]
+        hyb4_ds = hyb4_norm[::ds, ::ds]
+
+        # Contrast stretch each independently for better visibility
+        def stretch(arr):
+            lo, hi = np.percentile(arr, 1), np.percentile(arr, 99.5)
+            return np.clip((arr - lo) / (hi - lo + 1e-8), 0, 1)
+
+        live_disp = stretch(live_ds)
+        hyb4_disp = stretch(hyb4_ds)
+
+        # --- Build RGB overlay: Live=magenta (R+B), Hyb4=green (G) ---
+        h, w = live_disp.shape
+        overlay = np.zeros((h, w, 3), dtype=np.float32)
+        overlay[:, :, 0] = live_disp           # R channel = Live
+        overlay[:, :, 1] = hyb4_disp           # G channel = Hyb4
+        overlay[:, :, 2] = live_disp           # B channel = Live
+        # Result: Live-only → magenta, Hyb4-only → green, both → white
+
+        # --- Plot ---
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle(
+            f"Module 1 QC — FOV Mapping\n"
+            f"Crop: y0={y0}, x0={x0} | size={crop_h}×{crop_w}px | "
+            f"score={crop_info['match_score']:.3f} | "
+            f"offset dy={crop_info['offset_from_center_dy']:+d}, dx={crop_info['offset_from_center_dx']:+d} px",
+            fontsize=11
+        )
+
+        axes[0].imshow(live_disp, cmap="gray", vmin=0, vmax=1)
+        axes[0].set_title("Live DAPI\n(10x upscaled ×2)", fontsize=10)
+        axes[0].axis("off")
+
+        axes[1].imshow(hyb4_disp, cmap="gray", vmin=0, vmax=1)
+        axes[1].set_title("Hyb4 DAPI crop\n(20x, ICC_Processed)", fontsize=10)
+        axes[1].axis("off")
+
+        axes[2].imshow(overlay)
+        axes[2].set_title("Overlay\nMagenta=Live | Green=Hyb4 | White=aligned", fontsize=10)
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        out_path = self.results_dir / "module1_fov_overlay_QC.png"
+        plt.savefig(str(out_path), dpi=150, bbox_inches="tight")
+        plt.close()
+        logger.info(f"  Overlay saved → {out_path.name}")
+
+    # ------------------------------------------------------------------
+    # Step 7: Save crop coordinates
     # ------------------------------------------------------------------
     def save_crop_coords(self, crop_info: dict):
         """Save crop coordinates and match metadata to JSON."""
@@ -276,7 +364,7 @@ class FOVMapper:
         out_path = self.results_dir / fname
         with open(out_path, "w") as f:
             json.dump(crop_info, f, indent=2)
-        logger.info(f"[M1 Step 6] Crop coords saved → {out_path}")
+        logger.info(f"[M1 Step 7] Crop coords saved → {out_path}")
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -298,6 +386,7 @@ class FOVMapper:
         hyb4_arr = self.load_hyb4_icc()
         crop_info = self.find_crop_position(template, hyb4_arr)
         self.extract_and_save_channels(hyb4_arr, crop_info)
+        self.visualize_result(template, hyb4_arr, crop_info)
         self.save_crop_coords(crop_info)
 
         elapsed = time.time() - t_total
