@@ -1,0 +1,33 @@
+# Module 3 — Hyb-to-Hyb BF Registration Configuration
+# Purpose: Register Hyb2 and Hyb3 BF channels to the Hyb4 BF crop (reference).
+#
+# Why BF and not DAPI?
+#   Hyb2 and Hyb3 are DNase-treated → DAPI signal ≈ 0 in those rounds.
+#   BF (brightfield) is unaffected by DNase and shows cell body morphology
+#   consistently across all three hybridization rounds.
+#
+# Registration strategy:
+#   - Reference : Hyb4 BF crop (already extracted and saved by Module 1)
+#   - Moving    : Hyb2 BF crop, Hyb3 BF crop (cropped on-the-fly using M1 coords)
+#   - Method    : phase cross-correlation (normalization=None) + Pearson r QC
+#   - Each Hyb is registered independently to Hyb4 (no chaining; avoids error accumulation)
+#
+# Expected shift magnitude: < 50 px (same well, same mounting, only buffer exchange between rounds)
+
+input:
+  hyb4_bf_crop_path:  "python_results/module1/hyb4_crop_BF.npy"    # M1 output — Hyb4 BF already cropped
+  crop_coords_path:   "python_results/module1/crop_coords.json"     # M1 crop origin (y0, x0, h, w)
+  hyb2_icc_path: "IMAGES/20260123_psy_redo_3 hyb2_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+  hyb3_icc_path: "IMAGES/20260123_psy_redo_3 hyb3_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+
+processing:
+  hyb_bit_depth:    16      # ICC_Processed are uint16 (16-bit ADC)
+  clip_percentile:  99.9    # clip extreme outliers before normalization
+  bf_channel_idx:   4       # Z=4 in ICC_Processed Z-axis (FIJI export: Z encodes channels)
+  upsample_factor:  10      # sub-pixel precision = 0.1 px
+  max_shift_px:     50      # warn if |shift| > 50 px (larger shifts suggest a problem)
+
+output:
+  results_dir:        "python_results/module3"
+  reg_hyb2_filename:  "registration_hyb2_to_hyb4.json"
+  reg_hyb3_filename:  "registration_hyb3_to_hyb4.json"
