@@ -52,6 +52,13 @@
 
 ## Registration Lessons
 
+### Nuclear morphology changes between Live and Hyb4 — expected, not a bug
+- Live DAPI (10x): lower NA optics → larger PSF → nuclei appear blurry/larger
+- Hyb4 DAPI (20x): higher NA → sharper boundaries; also fixed cells have condensed chromatin
+- Template matching score ~0.55 (not 1.0) is expected and acceptable due to this difference
+- Phase correlation (M2) is more robust to morphology changes than template matching
+- Impact on pipeline: minimal — nuclear centroids are still in the same positions
+
 ### Scale ratio: Live 10x → Hyb 20x
 - Same camera used for both modalities → pixel ratio = exactly 2:1
 - Live FOV at 20x resolution: `2432 × 2 = 4864 px` (width), `2032 × 2 = 4064 px` (height)
