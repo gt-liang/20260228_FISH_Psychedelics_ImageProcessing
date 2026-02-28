@@ -1,0 +1,63 @@
+# ===== Large image data (never commit raw/processed images) =====
+IMAGES/
+*.tif
+*.tiff
+*.czi
+*.npy
+*.h5
+*.hdf5
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+*.pyc
+
+# ===== Virtual environments =====
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ===== Jupyter Notebooks =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== Results / outputs (track structure, not data) =====
+python_results/
+test_results/
+processed_images/
+logs/
+*.log
+*.csv
+*.svg
+*.png
+!docs/**/*.png
+
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Secrets / credentials =====
+*.env
+secrets.yaml
+credentials.*
