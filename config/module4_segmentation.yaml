@@ -1,0 +1,33 @@
+# Module 4 — Nuclear Segmentation Configuration
+# Purpose: Segment nuclei in the Hyb4 DAPI crop using CellposeSAM.
+#
+# Why Hyb4 DAPI?
+#   - Hyb4 is the only round with usable DAPI (Hyb2/Hyb3 are DNase-treated).
+#   - The Hyb4 DAPI crop is already in the reference coordinate system.
+#   - The output label image is the common spatial reference for all
+#     downstream spot calling (Module 5) and decoding (Module 6).
+#
+# CellposeSAM (v4): One universal model; model_type argument is ignored.
+# Use diameter=0 for auto-detection, or set to known mean nuclear diameter.
+
+input:
+  hyb4_dapi_crop_path: "python_results/module1/hyb4_crop_DAPI.npy"  # M1 output
+
+processing:
+  hyb4_bit_depth: 16          # normalize by 65535 before passing to Cellpose
+  clip_percentile: 99.9       # clip extreme outliers before normalization
+
+  # Cellpose parameters
+  diameter: 0                 # 0 = auto-detect nuclear diameter from image
+  flow_threshold:  0.4        # Cellpose flow error threshold (default=0.4)
+  cellprob_threshold: 0.0     # cell probability threshold (default=0.0; lower → more cells)
+  use_gpu: true               # use MPS (Apple Silicon) if available
+
+  # Post-segmentation filters
+  min_nucleus_area_px: 500    # remove nuclei smaller than this (debris / partial nuclei)
+  max_nucleus_area_px: 50000  # remove nuclei larger than this (clumped / artefact)
+
+output:
+  results_dir: "python_results/module4"
+  label_filename:    "nucleus_labels.npy"    # uint32 label image, 0=background
+  props_filename:    "nucleus_properties.csv" # per-nucleus: id, centroid_y, centroid_x, area
