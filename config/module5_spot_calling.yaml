@@ -1,0 +1,50 @@
+# Module 5 — Spot Calling Configuration
+# Purpose: For each nucleus × each hybridization round × each fluorescence channel,
+#          extract the max pixel intensity within the nucleus mask.
+#
+# Scientific basis (Method X):
+#   Each cell pool has exactly ONE fluorescent spot in ONE channel per round.
+#   Therefore, for decoding we only need to know WHICH channel is brightest per nucleus.
+#   The signal metric is: max pixel intensity within the nucleus mask per channel.
+#   This avoids the need for explicit spot detection (which is more sensitive to
+#   threshold choices and background variability).
+#
+# Coordinate system:
+#   - Hyb4 is the reference frame (nucleus_labels.npy is in Hyb4 pixel coordinates).
+#   - For Hyb2 and Hyb3, the nucleus mask is shifted by the M3 registration offsets
+#     BEFORE sampling, so that we sample from the correct spatial position in each round.
+#   - Shift convention: shift (dy, dx) = offset of HybN BF relative to Hyb4 BF.
+#     To go from Hyb4 coordinates to HybN coordinates, ADD (dy, dx) to each pixel position.
+#     Equivalently, SHIFT the mask by (-dy, -dx) before sampling from HybN images.
+
+input:
+  # Module 1 outputs — Hyb4 fluorescence crops (reference frame)
+  hyb4_ch1_af647_path: "python_results/module1/hyb4_crop_Ch1_AF647.npy"
+  hyb4_ch2_af590_path: "python_results/module1/hyb4_crop_Ch2_AF590.npy"
+  hyb4_ch3_af488_path: "python_results/module1/hyb4_crop_Ch3_AF488.npy"
+
+  # Module 3 outputs — Hyb2 and Hyb3 ICC_Processed TIF files
+  hyb2_icc_path: "IMAGES/20260123_psy_redo_3 hyb2_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+  hyb3_icc_path: "IMAGES/20260123_psy_redo_3 hyb3_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+
+  # Module 3 registration results
+  reg_hyb2_path: "python_results/module3/registration_hyb2_to_hyb4.json"
+  reg_hyb3_path: "python_results/module3/registration_hyb3_to_hyb4.json"
+
+  # Module 4 outputs — nucleus mask and crop coordinates
+  nucleus_labels_path:  "python_results/module4/nucleus_labels.npy"
+  nucleus_props_path:   "python_results/module4/nucleus_properties.csv"
+  crop_coords_path:     "python_results/module1/crop_coords.json"
+
+processing:
+  hyb_bit_depth: 16      # ICC_Processed files are uint16
+
+  # Channel indices in ICC_Processed Z-axis (FIJI export: Z encodes 5 channels)
+  icc_channels:
+    Ch1_AF647: 3
+    Ch2_AF590: 1
+    Ch3_AF488: 2
+
+output:
+  results_dir:       "python_results/module5"
+  intensity_filename: "spot_intensities.csv"   # per nucleus × round × channel
