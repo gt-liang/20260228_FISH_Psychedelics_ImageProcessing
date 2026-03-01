@@ -86,16 +86,85 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 - [ ] Review `qc_m6_barcode_counts.png` — do top barcodes match expected cell pool ratios?
 - [ ] Review `qc_m5_snr_distribution.png` — is `background_threshold=2000 ADU` appropriate?
 - [ ] Decide: adjust `background_threshold` in `config/module6_decoding.yaml` and re-run M6 + QC
-- [ ] (Future) Add Module 5 Method Y (Ronan-style adaptive threshold) for comparison
+
+---
+
+## Next Implementation Tasks (prioritised)
+
+### 1. QC — Add nucleus boundaries to spot overlay (quick, high value)
+- In `run_qc_enhanced.py → fig_spot_overlay()`, draw nucleus boundary contours on top of the colored fill
+- Use `skimage.segmentation.find_boundaries(labels)` to get 1-px boundary mask
+- Draw in white/light grey so boundaries are visible even when adjacent nuclei share a color
+- This makes it possible to see individual nucleus outlines when colors are the same
+
+### 2. Spot Calling — Add Method Y (Ronan-style) for cross-comparison
+- Implement in `src/module5_spot_calling/spot_caller.py` or as a separate `method_y_caller.py`
+- Ronan's logic per nucleus per channel: threshold = `cell_mean + 6 × cell_std` (capped at 65000)
+- Morphology: `measure.label(binary)` → `remove_small_objects(min_size=10)`
+- Signal = total puncta area (not max intensity)
+- Compare Method X vs Method Y: do they agree on which channel is brightest?
+- Output: `spot_intensities_methodY.csv` + side-by-side comparison figure
+
+### 3. Investigate the top-right population in M5 channel scatter
+- In Hyb4 scatter (Ch1_AF647 vs Ch3_AF488): a small cluster appears in the top-right
+  (both channels simultaneously high) — see discussion below
+- Action: identify which nucleus_ids fall in this cluster (define as: Ch1 > X AND Ch3 > X)
+- Check their spot overlay appearance, SNR, and barcode calls
+- Determine cause: incomplete washing vs debris vs registration artifact
+
+### 4. Cell ID mapping — Live → Hyb4 (Module 7 candidate)
+- Use M2 shift (dy=−0.20, dx=−0.20 px) to map Live cell centroids into Hyb4 frame
+- Input: Live nucleus segmentation (needs to be run on Live DAPI C00 image)
+- Output: mapping table `live_nucleus_id ↔ hyb4_nucleus_id` (nearest-centroid matching)
+- Allows linking Live cell morphology / timelapse data to the barcode assignment
 
 ---
 
 ## Pending — Analysis & Downstream
 
 - [ ] Map barcodes to drug/condition identity (requires barcode lookup table from experiment design)
-- [ ] Merge with Live nucleus IDs (use M2 shift to map Live cell coordinates → Hyb4 frame)
+- [ ] Merge with Live nucleus IDs (task 4 above)
 - [ ] Per-condition statistics: cell count per barcode, spatial clustering analysis
 - [ ] Export figures for paper / presentation
+
+---
+
+## Science Discussion — Top-Right Population in M5 Channel Scatter
+
+### Observation
+In `qc_m5_channel_scatter.png` (Hyb4 panel), there is a small population of nuclei
+in the top-right corner: **high Ch1_AF647 AND high Ch3_AF488 simultaneously**.
+These nuclei get an argmax call (whichever is slightly higher wins) but their SNR is low.
+
+### Possible causes (in order of likelihood)
+
+1. **Incomplete washing / carry-over** ← most likely
+   - If washing between rounds was insufficient, residual AF647 or AF488 oligos
+     from a previous hybridization remain bound
+   - These nuclei have genuine signal in one channel but elevated background in another
+   - Typical indicator: the "extra bright" channel is consistent with carry-over direction
+   - Action: check if these nuclei have specific barcodes that suggest carry-over
+
+2. **Autofluorescence hotspots**
+   - Some cells (especially stressed or dying cells) have elevated autofluorescence
+     across multiple channels simultaneously
+   - Autofluorescence is typically broad-spectrum → lights up all channels equally
+   - Indicator: all 3 channels bright, not just 2
+
+3. **Registration artifact (less likely)**
+   - If the nucleus mask slightly overlaps a neighboring nucleus that has a different color
+   - Would cause both max intensities to be high (sampling from two cells)
+   - More likely at cell boundaries; check spatial position of these nuclei
+
+4. **True biology (unlikely but possible)**
+   - In theory, a cell could legitimately have two spots if barcoding failed
+   - Would indicate a cell that received two oligo pools — possible but unlikely in well-controlled experiments
+
+### Recommended handling
+- Flag these nuclei: define as dual-high if both Ch1 and Ch3 > (e.g.) 15000 ADU
+- Tag them as `dual_high=True` in barcodes.csv
+- Do NOT automatically exclude — report them separately for biological interpretation
+- Cross-check with Method Y: does Ronan-style also find signal in both channels?
 
 ---
 
