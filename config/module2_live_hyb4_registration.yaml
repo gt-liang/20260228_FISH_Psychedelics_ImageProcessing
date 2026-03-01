@@ -1,0 +1,34 @@
+# Module 2 — Live → Hyb4 Global Registration Configuration
+# Purpose: Find the precise translation (dy, dx) between the 10x Live DAPI
+# and the 20x Hyb4 DAPI crop (output of Module 1).
+#
+# Method: Phase correlation (skimage.registration.phase_cross_correlation)
+# Rationale: Phase correlation operates in the frequency domain and is robust
+# to intensity differences, morphology changes (Live vs Fixed), and sparse
+# debris artifacts. It finds the global translation between two same-size images.
+# No rotation or scaling is expected (same well, similar mounting conditions).
+
+input:
+  live_dapi_path: "IMAGES/B7-FOVB--t1118--C00.tif"          # 10x Live DAPI (uint16, 12-bit)
+  hyb4_dapi_crop_path: "python_results/module1/hyb4_crop_DAPI.npy"  # from Module 1 output
+
+processing:
+  pixel_ratio: 2.0          # 10x → 20x pixel size ratio (same camera, 2:1)
+  live_bit_depth: 12        # ADC bit depth of Live (normalize by 4095)
+  hyb4_bit_depth: 16        # ADC bit depth of Hyb4 (normalize by 65535)
+
+  # Phase correlation parameters
+  upsample_factor: 10       # sub-pixel precision: shift estimated to 1/10 pixel
+                            # upsample_factor=10 → 0.1 px precision, fast enough
+
+  # Quality guard thresholds
+  max_shift_px: 200         # if |dy| or |dx| > this, log WARNING (unexpected large drift)
+  min_phase_peak: 0.05      # normalized phase correlation peak; below = poor registration
+
+  # Normalization: clip percentile before phase correlation
+  clip_percentile: 99.9     # preserve DAPI nuclear peaks
+
+output:
+  results_dir: "python_results/module2"
+  registration_filename: "registration_live_hyb4.json"
+  # Saved fields: dy, dx, shift_magnitude_px, phase_peak_value
