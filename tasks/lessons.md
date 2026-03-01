@@ -1,6 +1,6 @@
 # Lab Knowledge Base - Lessons Learned
 **Project**: FISH Psychedelics Image Processing
-**Updated**: 2026-02-28
+**Updated**: 2026-03-01
 
 ---
 
@@ -47,6 +47,21 @@
 - AF590 (Ch2) → Blue
 - AF488 (Ch3) → Yellow
 - DAPI → Gray (segmentation channel, not decoded)
+
+### Imaging order and mCherry bleaching
+- Imaging order: **Hyb4 → Hyb3 → Hyb2** (Hyb4 is imaged FIRST)
+- mCherry fluorescent protein was not fully eliminated before imaging
+- Observed bleaching: ~19.8% from Hyb4 to Hyb2 (mCherry signal decreases over time)
+- mCherry appears in Ch2_AF590 (Blue channel) in all 3 rounds → false Blue calls
+- Cross-round correction uses mean(Ch2_Hyb4, Ch2_Hyb2) as per-nucleus mCherry baseline
+  because Hyb4 and Hyb2 are the imaging endpoints and their mean linearly interpolates
+  the mCherry signal at the Hyb3 timepoint
+
+### None population is biologically expected
+- Not all cells in the FOV will have been successfully labeled with a barcode
+- Cells outside the barcode library (contaminating cells, unlabeled cells) → legitimately no signal
+- Accept None calls as a valid biological outcome; do NOT try to force 100% decoding
+- In barcodes.csv: retain all cells with `decoded_ok=False`; downstream analysis filters on `decoded_ok=True`
 
 ---
 
@@ -135,6 +150,70 @@
   ```
 
 ---
+
+## Cross-Round Correction Lessons (2026-03-01)
+
+### Apply _xr correction only to Ch2_AF590 — NOT to Ch1 or Ch3
+- **Problem**: applying cross-round minimum subtraction (_xr) to all 3 channels caused 22.8% None rate (281 cells)
+- **Root cause**: Ch1_AF647 and Ch3_AF488 have cross-round carry-over at ~800 ADU median,
+  which is the SAME order of magnitude as borderline Purple/Yellow FISH signals (~500–2000 ADU).
+  Subtracting this carry-over zeroes out borderline cells → false None calls (Type B over-correction)
+- **mCherry is different**: Ch2_AF590 carry-over is driven by mCherry persistent fluorescence,
+  not by FISH carry-over. mCherry is present uniformly across all rounds → min subtraction
+  correctly removes it without touching genuine Blue FISH signal peaks
+- **Rule**: `_xr` for Ch2 only; `_corr` (spatial bg) for Ch1 and Ch3
+
+### Two types of None cells — must distinguish before accepting
+- **Type A** (all rounds low signal, all _xr < 500 ADU): genuinely unlabeled cells → correct None
+- **Type B** (2 strong rounds + 1 collapsed to 0 by _xr): over-correction artifact → wrong None
+- Type B cells can be identified by: max_xr in "None" round = 0 while other rounds >> threshold
+- If Type B cells are numerous → reduce aggressiveness of correction (apply to fewer channels)
+
+### Cross-round _xr correction formula
+```python
+# Per nucleus, per channel:
+xr_bg = min(Ch_corr_Hyb2, Ch_corr_Hyb3, Ch_corr_Hyb4)  # minimum across rounds = carry-over baseline
+xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negative intensities)
+```
+- The minimum across rounds is the best per-nucleus estimate of cross-round carry-over
+- Assumes each cell has genuine FISH signal in at most ONE round per channel (true for this experiment)
+
+### mCherry baseline for Hyb3 correction
+- Imaging order Hyb4 → Hyb3 → Hyb2 with 19.8% bleaching
+- mean(Ch2_Hyb4, Ch2_Hyb2) linearly interpolates mCherry at the Hyb3 timepoint
+- This is equivalent to the _xr approach applied only to Ch2
+
+### Threshold selection after _xr correction
+- After _xr correction, threshold = 500 ADU is appropriate:
+  - Ch2_xr in non-signal rounds (mCherry baseline subtracted) collapses to ~0-200 ADU
+  - Genuine Blue FISH peaks remain >> 500 ADU after subtraction
+  - Ch1/Ch3 use _corr with same 500 ADU threshold — spatial bg subtraction brings noise to ~200 ADU
+
+---
+
+## Method Y (Ronan-style) Lessons
+
+### Use regionprops bounding boxes for per-nucleus crops — avoids full-image scan
+- `skimage.measure.regionprops(labels)` returns bounding boxes for each nucleus
+- Crop to `labels[r0:r1, c0:c1]` before threshold/binary/label → ~50×50 px instead of 5714×6852
+- Makes the per-nucleus loop fast: 1230 nuclei × 3 channels × 3 rounds = 3.4 s total
+
+### Zero-inflation inflates X–Y disagreement — report carefully
+- When Method Y area=0 in ALL channels, `idxmax()` returns the first column (Ch1_AF647 by default)
+- This is not a real call — the nucleus simply has no detectable punctum
+- Disagreement between X and Y is often driven by these "no punctum" cases, not true mis-calls
+- Recommendation: compute agreement only on nuclei where Method Y has area > 0 in ≥1 channel
+
+### Puncta area ~14 px² is biologically expected for smFISH at 20× (0.65 µm/px)
+- Single diffraction-limited spot ≈ 300 nm diameter → ~0.5 µm × 0.5 µm → ~0.25 µm²
+- At 0.65 µm/px: 0.25 µm² / 0.4225 µm²/px ≈ 0.6 px — BUT oversampled by PSF → ~14 px²
+- Areas > 200 px² likely indicate aggregates, debris, or two overlapping cells
+
+### Dual-high population (both Ch1 AND Ch3 > p80) — expected interpretation
+- Hyb4 has the largest dual-high population (n=121) because it is the last round with the
+  most cumulative carry-over from Hyb2 and Hyb3 residual oligos
+- Cross-check with Method Y: if both channels show area > 0 → real carry-over signal;
+  if both areas = 0 → elevated background/autofluorescence, not true puncta
 
 ## QC & Visualization Lessons
 

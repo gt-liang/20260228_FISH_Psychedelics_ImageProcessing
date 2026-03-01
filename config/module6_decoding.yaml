@@ -28,8 +28,28 @@ input:
   nucleus_props_path: "python_results/module4/nucleus_properties.csv"  # M4 centroids
 
 processing:
-  background_threshold: 2000   # raw ADU; nuclei where max(channels) < threshold → None
-                                # Adjust based on M5 QC violin plot
+  # ── Correction level ─────────────────────────────────────────────────────
+  # Three-level correction cascade (applied in order by Module 5):
+  #
+  #   Level 0 — raw:         use raw max intensities (no correction)
+  #   Level 1 — spatial bg:  use _corr columns (per-nucleus median subtraction,
+  #                          removes autofluorescence + diffuse protein bg)
+  #   Level 2 — cross-round: use _xr columns (spatial bg PLUS cross-round minimum
+  #                          subtraction, additionally removes carry-over and
+  #                          persistent fluorescence such as mCherry in Ch2_AF590)
+  #
+  # Set use_background_subtracted: true  → enables Level 1
+  # Set use_cross_round_correction: true → enables Level 2 (requires Level 1)
+  use_background_subtracted: true
+  use_cross_round_correction: true
+
+  background_threshold: 2000            # raw ADU (Level 0 only)
+  corrected_background_threshold: 500   # ADU after spatial bg subtraction (Level 1)
+  cross_round_threshold: 500            # ADU — used when use_cross_round_correction=true
+                                        # Applies to Ch2_AF590_xr AND Ch1/Ch3_corr equally.
+                                        # Ch2_xr values in non-signal rounds collapse to ~0
+                                        # after mCherry subtraction, so 500 ADU safely
+                                        # separates noise from genuine Blue FISH signal.
 
   # Color labels
   color_map:

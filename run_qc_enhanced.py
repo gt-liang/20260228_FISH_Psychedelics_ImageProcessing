@@ -31,6 +31,7 @@ import pandas as pd
 from aicsimageio import AICSImage
 from loguru import logger
 from scipy.ndimage import shift as ndimage_shift
+from skimage.segmentation import find_boundaries
 
 # ─────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent
@@ -51,6 +52,7 @@ PALETTE = {
     "None":   "#95A5A6",
 }
 CHANNELS = ["Ch1_AF647", "Ch2_AF590", "Ch3_AF488"]
+DUAL_HIGH_PCT = 80   # percentile threshold for "dual-high" flag (both Ch1 & Ch3 above this)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loading helpers
@@ -110,24 +112,79 @@ def compute_snr(df_int: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def find_dual_high(df_int: pd.DataFrame, pct: int = DUAL_HIGH_PCT) -> dict:
+    """
+    Identify nuclei that are SIMULTANEOUSLY high in BOTH Ch1_AF647 AND Ch3_AF488
+    in each hybridisation round.
+
+    Scientific logic:
+      Each cell should carry signal in exactly ONE channel per round (by design).
+      Nuclei with BOTH Ch1 and Ch3 elevated above the Nth percentile are candidate
+      carry-over artefacts (incomplete washing), autofluorescence hotspots, or
+      registration edge effects where the nucleus mask overlaps a neighbour.
+
+    Parameters:
+      df_int : Module 5 spot_intensities.csv (one row per nucleus × round)
+      pct    : percentile cutoff (default 80)
+
+    Returns:
+      dict keyed by round name, each value = {
+          "nids"      : set of dual-high nucleus_ids,
+          "thresh_ch1": float ADU threshold for Ch1,
+          "thresh_ch3": float ADU threshold for Ch3,
+      }
+    """
+    result = {}
+    for rnd in ["Hyb2", "Hyb3", "Hyb4"]:
+        df_r = df_int[df_int["round"] == rnd].copy()
+        if len(df_r) == 0:
+            continue
+        thresh_ch1 = float(np.percentile(df_r["Ch1_AF647"].values, pct))
+        thresh_ch3 = float(np.percentile(df_r["Ch3_AF488"].values, pct))
+        dual_mask = (df_r["Ch1_AF647"] > thresh_ch1) & (df_r["Ch3_AF488"] > thresh_ch3)
+        nids = set(df_r.loc[dual_mask, "nucleus_id"].values.tolist())
+        result[rnd] = {
+            "nids":       nids,
+            "thresh_ch1": thresh_ch1,
+            "thresh_ch3": thresh_ch3,
+        }
+        logger.info(
+            f"  Dual-high [{rnd}]: {len(nids)} nuclei "
+            f"(Ch1>{thresh_ch1:.0f} AND Ch3>{thresh_ch3:.0f} ADU, p{pct})"
+        )
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Figure 1: Channel scatter per round (Ch1 vs Ch3, colored by decoded call)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fig_channel_scatter(df_int: pd.DataFrame, df_bc: pd.DataFrame):
+def fig_channel_scatter(df_int: pd.DataFrame, df_bc: pd.DataFrame,
+                        dual_high_per_round: dict = None):
     """
     Ch1_AF647 vs Ch3_AF488 scatter per round.
     Each dot = one nucleus, colored by its decoded color for that round.
     Scientific purpose: shows whether channel separation is clean.
     A good call: the argmax channel should be far above the others → elongated cluster.
+
+    If dual_high_per_round is provided (from find_dual_high()):
+      - Dashed vertical line at Ch1 p80 threshold
+      - Dashed horizontal line at Ch3 p80 threshold
+      - Orange hollow rings overlaid on dual-high nuclei
+      - Text annotation with dual-high count
     """
-    logger.info("Generating M5 channel scatter...")
+    logger.info("Generating M5 channel scatter (with dual-high highlights)...")
     rounds = ["Hyb2", "Hyb3", "Hyb4"]
     col_map = {"Hyb2": "color_hyb2", "Hyb3": "color_hyb3", "Hyb4": "color_hyb4"}
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle("M5 QC — Channel Separation (Ch1_AF647 vs Ch3_AF488)\n"
-                 "Each dot = one nucleus; color = decoded assignment for that round", fontsize=11)
+    fig.suptitle(
+        "M5 QC — Channel Separation (Ch1_AF647 vs Ch3_AF488)\n"
+        "Each dot = one nucleus; color = decoded assignment for that round\n"
+        f"Orange rings = dual-high (both Ch1 & Ch3 > p{DUAL_HIGH_PCT}; "
+        "likely carry-over / washing artefact)",
+        fontsize=11
+    )
 
     for ax, rnd in zip(axes, rounds):
         df_r = df_int[df_int["round"] == rnd].copy()
@@ -135,6 +192,7 @@ def fig_channel_scatter(df_int: pd.DataFrame, df_bc: pd.DataFrame):
         df_r = df_r.merge(df_bc[["nucleus_id", color_col]], on="nucleus_id", how="left")
         df_r[color_col] = df_r[color_col].fillna("None")
 
+        # --- Base scatter: all nuclei colored by decoded call ---
         for color_label, grp in df_r.groupby(color_col):
             ax.scatter(
                 grp["Ch1_AF647"], grp["Ch3_AF488"],
@@ -142,16 +200,127 @@ def fig_channel_scatter(df_int: pd.DataFrame, df_bc: pd.DataFrame):
                 s=10, alpha=0.6, label=f"{color_label} (n={len(grp)})"
             )
 
+        # --- Diagonal guide: y=x ---
+        lim = max(ax.get_xlim()[1], ax.get_ylim()[1])
+        ax.plot([0, lim], [0, lim], "k--", lw=0.5, alpha=0.3)
+
+        # --- Dual-high overlay ---
+        if dual_high_per_round and rnd in dual_high_per_round:
+            dh = dual_high_per_round[rnd]
+            thresh_ch1 = dh["thresh_ch1"]
+            thresh_ch3 = dh["thresh_ch3"]
+            nids_dh    = dh["nids"]
+
+            # Threshold lines to delineate top-right quadrant
+            ax.axvline(thresh_ch1, color="darkorange", lw=1.2, linestyle="--", alpha=0.85,
+                       label=f"Ch1 p{DUAL_HIGH_PCT}={thresh_ch1:.0f} ADU")
+            ax.axhline(thresh_ch3, color="saddlebrown", lw=1.2, linestyle="--", alpha=0.85,
+                       label=f"Ch3 p{DUAL_HIGH_PCT}={thresh_ch3:.0f} ADU")
+
+            # Orange hollow rings on dual-high nuclei
+            df_dh = df_r[df_r["nucleus_id"].isin(nids_dh)]
+            if len(df_dh) > 0:
+                ax.scatter(
+                    df_dh["Ch1_AF647"], df_dh["Ch3_AF488"],
+                    facecolors="none", edgecolors="darkorange",
+                    linewidths=1.5, s=70, zorder=5,
+                    label=f"Dual-high (n={len(df_dh)})"
+                )
+                # Annotation box in top-right corner
+                ax.text(
+                    0.97, 0.96, f"dual-high: n={len(df_dh)}",
+                    transform=ax.transAxes, ha="right", va="top",
+                    fontsize=8, color="darkorange",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                              ec="darkorange", alpha=0.85)
+                )
+
         ax.set_xlabel("Ch1_AF647 (raw ADU)", fontsize=9)
         ax.set_ylabel("Ch3_AF488 (raw ADU)", fontsize=9)
         ax.set_title(f"{rnd}", fontsize=10)
         ax.legend(fontsize=7, markerscale=2)
-        # Diagonal guide: y=x means equal intensity in both channels
-        lim = max(ax.get_xlim()[1], ax.get_ylim()[1])
-        ax.plot([0, lim], [0, lim], "k--", lw=0.5, alpha=0.3, label="y=x")
 
     plt.tight_layout()
     out = QC_DIR / "qc_m5_channel_scatter.png"
+    plt.savefig(str(out), dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info(f"  Saved → {out.name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 1b: Dual-high spatial map (companion to channel scatter)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fig_dual_high_spatial(df_bc: pd.DataFrame, dual_high_per_round: dict):
+    """
+    Spatial scatter of all nucleus centroids per round (colored by decoded call),
+    with dual-high nuclei highlighted as large orange hollow circles.
+
+    Scientific purpose:
+      - If dual-high nuclei cluster at the FOV edge → likely registration artefact
+        (nucleus mask bleeds into a neighbour carrying a different oligo).
+      - If scattered uniformly → autofluorescence hotspot or incomplete washing.
+      - Cross-check with Method Y: dual-high cells that have Method Y puncta in
+        both channels confirm biological carry-over; those with no puncta confirm
+        autofluorescence or background elevation.
+    """
+    logger.info("Generating dual-high spatial map...")
+    rounds  = ["Hyb2", "Hyb3", "Hyb4"]
+    col_map = {"Hyb2": "color_hyb2", "Hyb3": "color_hyb3", "Hyb4": "color_hyb4"}
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    fig.suptitle(
+        f"Dual-High Population — Spatial Map  (p{DUAL_HIGH_PCT} threshold, Ch1_AF647 AND Ch3_AF488)\n"
+        "Orange circles = dual-high nuclei | Interpretation: edge-cluster → registration; "
+        "scatter → carry-over / autofluorescence",
+        fontsize=10
+    )
+
+    for ax, rnd in zip(axes, rounds):
+        color_col = col_map[rnd]
+        if color_col not in df_bc.columns:
+            ax.set_visible(False)
+            continue
+
+        # Background: all nuclei colored by decoded call
+        for color_label, grp in df_bc.groupby(color_col):
+            ax.scatter(
+                grp["centroid_x"], grp["centroid_y"],
+                c=PALETTE.get(color_label, "#95A5A6"),
+                s=5, alpha=0.45, label=f"{color_label} (n={len(grp)})"
+            )
+
+        # Overlay: dual-high nuclei as orange hollow circles
+        dh     = dual_high_per_round.get(rnd, {})
+        nids_dh = dh.get("nids", set())
+        df_dh  = df_bc[df_bc["nucleus_id"].isin(nids_dh)]
+        n_dh   = len(df_dh)
+
+        if n_dh > 0:
+            ax.scatter(
+                df_dh["centroid_x"], df_dh["centroid_y"],
+                facecolors="none", edgecolors="darkorange",
+                linewidths=2.0, s=90, zorder=6,
+                label=f"Dual-high (n={n_dh})"
+            )
+            # Label individual nucleus IDs for manual inspection (if few)
+            if n_dh <= 30:
+                for _, row in df_dh.iterrows():
+                    ax.annotate(
+                        str(int(row["nucleus_id"])),
+                        (row["centroid_x"], row["centroid_y"]),
+                        fontsize=5, color="darkorange", ha="center", va="bottom",
+                        xytext=(0, 4), textcoords="offset points"
+                    )
+
+        ax.set_title(f"{rnd}  |  dual-high: n={n_dh}", fontsize=10)
+        ax.set_xlabel("x (px, Hyb4 frame)", fontsize=8)
+        ax.set_ylabel("y (px, Hyb4 frame)", fontsize=8)
+        ax.invert_yaxis()
+        ax.legend(fontsize=7, markerscale=2)
+
+    plt.tight_layout()
+    out = QC_DIR / "qc_m5_dual_high_spatial.png"
     plt.savefig(str(out), dpi=150, bbox_inches="tight")
     plt.close()
     logger.info(f"  Saved → {out.name}")
@@ -382,15 +551,28 @@ def fig_spot_overlay(labels: np.ndarray, df_bc: pd.DataFrame,
             color_label = row[color_col] if pd.notna(row[color_col]) else "None"
             nid_to_color[nid] = PALETTE.get(color_label, PALETTE["None"])
 
-        mask_rgba = make_mask_color_image(labels_use, nid_to_color)   # (H, W, 4)
+        # --- Build RGB color LUT for boundary pixels ---
+        # Maps nucleus_id → RGB float (no fill, boundaries only)
+        from matplotlib.colors import to_rgb
+        max_id = int(labels_use.max())
+        lut_rgb = np.zeros((max_id + 1, 3), dtype=np.float32)
+        for nid, hex_color in nid_to_color.items():
+            if nid <= max_id:
+                lut_rgb[nid] = to_rgb(hex_color)
 
         # --- Downsample for display ---
-        fluor_ds = fluor[::ds, ::ds]
-        mask_ds  = mask_rgba[::ds, ::ds]
+        fluor_ds  = fluor[::ds, ::ds]
+        labels_ds = labels_use[::ds, ::ds].astype(np.int32)
 
-        # Blend: fluorescence + colored mask
-        alpha = mask_ds[:, :, 3:4]
-        overlay_ds = fluor_ds * (1 - alpha) + mask_ds[:, :, :3] * alpha
+        # No fill — start from pure fluorescence composite
+        overlay_ds = fluor_ds.copy()
+
+        # Draw 1-px inner boundary outline, colored by decoded call
+        # mode='inner' keeps outlines inside each nucleus → adjacent same-color
+        # nuclei still have a visible gap between them.
+        boundary_ds   = find_boundaries(labels_ds, mode="inner")
+        boundary_nids = labels_ds[boundary_ds]       # nucleus ID at each boundary px
+        overlay_ds[boundary_ds] = lut_rgb[boundary_nids]  # color = decoded call
 
         # --- Choose a representative zoom region (centre of image) ---
         H_ds, W_ds = fluor_ds.shape[:2]
@@ -404,7 +586,7 @@ def fig_spot_overlay(labels: np.ndarray, df_bc: pd.DataFrame,
         fig.suptitle(
             f"M6 QC — Spot Overlay: {rnd}\n"
             f"Background: fluorescence composite (R=AF647, G=AF488, B=AF590)\n"
-            f"Nucleus fill: decoded color for this round  |  "
+            f"Nucleus outlines: decoded color  |  "
             f"Purple=AF647, Yellow=AF488, Blue=AF590, Gray=None",
             fontsize=10
         )
@@ -415,7 +597,7 @@ def fig_spot_overlay(labels: np.ndarray, df_bc: pd.DataFrame,
         axes[0].axis("off")
 
         axes[1].imshow(overlay_ds)
-        axes[1].set_title(f"Overlay: decoded color fills\n{rnd}", fontsize=9)
+        axes[1].set_title(f"Overlay: decoded color outlines\n{rnd}", fontsize=9)
         axes[1].axis("off")
         # Rectangle to mark zoom region
         from matplotlib.patches import Rectangle
@@ -557,10 +739,32 @@ def main():
 
     df_int, df_bc, labels, crop, reg2, reg3 = load_all_data()
 
+    # ── Dual-high population detection (done once, shared across figures) ────
+    logger.info("─" * 40)
+    logger.info(f"Computing dual-high population (Ch1_AF647 AND Ch3_AF488 > p{DUAL_HIGH_PCT})")
+    dual_high = find_dual_high(df_int)
+
+    # Save dual-high nucleus IDs to CSV for manual biological inspection
+    dh_rows = []
+    for rnd, dh in dual_high.items():
+        for nid in sorted(dh["nids"]):
+            dh_rows.append({
+                "round":      rnd,
+                "nucleus_id": int(nid),
+                "thresh_ch1": dh["thresh_ch1"],
+                "thresh_ch3": dh["thresh_ch3"],
+            })
+    if dh_rows:
+        df_dh_export = pd.DataFrame(dh_rows)
+        dh_csv_path  = QC_DIR / "dual_high_nucleus_ids.csv"
+        df_dh_export.to_csv(str(dh_csv_path), index=False)
+        logger.info(f"  Dual-high IDs saved → {dh_csv_path.name}  ({len(dh_rows)} rows)")
+
     # M5 QC figures
     logger.info("─" * 40)
     logger.info("M5 QC figures")
-    fig_channel_scatter(df_int, df_bc)
+    fig_channel_scatter(df_int, df_bc, dual_high_per_round=dual_high)
+    fig_dual_high_spatial(df_bc, dual_high)
     fig_snr_distribution(df_int)
     fig_intensity_heatmap(df_int, df_bc)
 
@@ -589,13 +793,15 @@ def main():
     print("QC COMPLETE — figures saved to python_results/qc/")
     print("=" * 50)
     print("  M5 QC:")
-    print("    qc_m5_channel_scatter.png   — channel separation per round")
-    print("    qc_m5_snr_distribution.png  — call confidence (max/2nd-max)")
-    print("    qc_m5_intensity_heatmap.png — nucleus × channel intensity")
+    print("    qc_m5_channel_scatter.png    — channel separation + dual-high overlay")
+    print("    qc_m5_dual_high_spatial.png  — spatial map of dual-high nuclei")
+    print("    qc_m5_snr_distribution.png   — call confidence (max/2nd-max)")
+    print("    qc_m5_intensity_heatmap.png  — nucleus × channel intensity")
+    print("    dual_high_nucleus_ids.csv    — nucleus IDs for manual inspection")
     print("  M6 QC:")
-    print("    qc_m6_spot_overlay_Hyb{2,3,4}.png — fluorescence + decoded overlay")
-    print("    qc_m6_barcode_counts.png    — top barcode counts")
-    print("    qc_m6_confidence_map.png    — SNR spatial distribution")
+    print("    qc_m6_spot_overlay_Hyb{2,3,4}.png — fluorescence + decoded overlay + boundaries")
+    print("    qc_m6_barcode_counts.png     — top barcode counts")
+    print("    qc_m6_confidence_map.png     — SNR spatial distribution")
     print("=" * 50)
 
 

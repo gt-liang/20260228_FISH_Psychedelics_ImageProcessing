@@ -64,13 +64,44 @@ class Decoder:
         self.results_dir = self.project_root / self.cfg["output"]["results_dir"]
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        self.color_map = self.cfg["processing"]["color_map"]    # {ch_name: color_label}
-        self.no_signal = self.cfg["processing"]["no_signal_label"]
-        self.bg_thresh = self.cfg["processing"]["background_threshold"]
-        self.channels = ["Ch1_AF647", "Ch2_AF590", "Ch3_AF488"]
+        self.color_map  = self.cfg["processing"]["color_map"]   # {ch_name: color_label}
+        self.no_signal  = self.cfg["processing"]["no_signal_label"]
+        self.use_corr   = self.cfg["processing"].get("use_background_subtracted", False)
+        self.use_xr     = self.cfg["processing"].get("use_cross_round_correction", False)
+        self.channels   = ["Ch1_AF647", "Ch2_AF590", "Ch3_AF488"]  # canonical names
+
+        # Column redirect: choose which correction layer to use per channel.
+        #
+        # use_cross_round_correction=true applies the cross-round minimum
+        # subtraction (_xr) ONLY to Ch2_AF590 (Blue), where mCherry fluorescent
+        # protein creates a persistent background across all rounds. Ch1 and Ch3
+        # retain the spatial bg subtraction (_corr) because they do not have a
+        # persistent-protein background problem — applying cross-round min to
+        # those channels would incorrectly remove borderline Purple/Yellow signals.
+        #
+        #   Ch2_AF590: _xr  (spatial bg + cross-round mCherry removal)
+        #   Ch1_AF647: _corr (spatial bg subtraction only)
+        #   Ch3_AF488: _corr (spatial bg subtraction only)
+        if self.use_xr and self.use_corr:
+            self.ch_cols = {
+                "Ch1_AF647": "Ch1_AF647_corr",  # spatial bg only — no persistent protein
+                "Ch2_AF590": "Ch2_AF590_xr",    # mCherry cross-round correction
+                "Ch3_AF488": "Ch3_AF488_corr",  # spatial bg only — no persistent protein
+            }
+            self.bg_thresh = self.cfg["processing"].get("cross_round_threshold", 200)
+            mode_label     = "Ch2 mCherry-corrected (_xr), Ch1/Ch3 spatial bg (_corr)"
+        elif self.use_corr:
+            self.ch_cols   = {ch: f"{ch}_corr" for ch in self.channels}
+            self.bg_thresh = self.cfg["processing"]["corrected_background_threshold"]
+            mode_label     = "spatial bg subtracted (_corr)"
+        else:
+            self.ch_cols   = {ch: ch for ch in self.channels}
+            self.bg_thresh = self.cfg["processing"]["background_threshold"]
+            mode_label     = "raw max intensity"
 
         logger.info(f"Decoder initialized | project_root={self.project_root}")
         logger.info(f"Results dir: {self.results_dir}")
+        logger.info(f"Mode: {mode_label}")
         logger.info(f"Background threshold: {self.bg_thresh} ADU")
 
     # ------------------------------------------------------------------
@@ -104,14 +135,16 @@ class Decoder:
         colors = {}
         for _, row in df_round.iterrows():
             nid = int(row["nucleus_id"])
-            vals = {ch: float(row[ch]) for ch in self.channels}
+            # self.ch_cols maps canonical channel name → CSV column to read
+            # (raw: Ch1_AF647, or corrected: Ch1_AF647_corr)
+            vals = {ch: float(row[self.ch_cols[ch]]) for ch in self.channels}
             max_val = max(vals.values())
 
             if max_val < self.bg_thresh:
                 colors[nid] = self.no_signal
             else:
                 best_ch = max(vals, key=vals.get)
-                colors[nid] = self.color_map[best_ch]
+                colors[nid] = self.color_map[best_ch]   # color_map keyed by canonical name
 
         return pd.Series(colors, name=round_name)
 
@@ -168,10 +201,20 @@ class Decoder:
             on="nucleus_id", how="left"
         )
 
-        # Append raw intensities for traceability
+        # Append raw, _bg, _corr, _xr_bg, _xr intensities for traceability
         for rnd in ["Hyb2", "Hyb3", "Hyb4"]:
-            df_rnd = df_int[df_int["round"] == rnd][["nucleus_id"] + self.channels]
-            df_rnd = df_rnd.rename(columns={ch: f"{rnd}_{ch}" for ch in self.channels})
+            extra_suffixes = ["_bg", "_corr", "_xr_bg", "_xr"]
+            trace_cols = ["nucleus_id"] + self.channels
+            extra_cols = [f"{ch}{sfx}" for ch in self.channels for sfx in extra_suffixes]
+            for c in extra_cols:
+                if c in df_int.columns:
+                    trace_cols.append(c)
+            df_rnd = df_int[df_int["round"] == rnd][trace_cols].copy()
+            rename_map = {ch: f"{rnd}_{ch}" for ch in self.channels}
+            for c in extra_cols:
+                if c in df_rnd.columns:
+                    rename_map[c] = f"{rnd}_{c}"
+            df_rnd = df_rnd.rename(columns=rename_map)
             df_decode = df_decode.merge(df_rnd, on="nucleus_id", how="left")
 
         n_total = len(df_decode)

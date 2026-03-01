@@ -1,6 +1,6 @@
 # FISH Psychedelics Image Processing - Task List
-**Last Updated**: 2026-02-28
-**Status**: Full pipeline implemented and running ✅
+**Last Updated**: 2026-03-01
+**Status**: Full pipeline implemented + mCherry cross-round correction ✅
 
 ---
 
@@ -30,6 +30,8 @@ Final output: Per-nucleus 3-round barcode — e.g., `Cell_42: Purple-Yellow-Blue
 Other-channel signals = carry-over from incomplete washing → suppressed by argmax.
 
 **Key imaging constraint**: Hyb2 & Hyb3 DNase-treated → DAPI ≈ 0 in those rounds.
+
+**Imaging order**: Hyb4 → Hyb3 → Hyb2 (Hyb4 imaged first; mCherry bleaches ~19.8% by Hyb2).
 
 ---
 
@@ -64,107 +66,85 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 ### ✅ Module 5 — Spot Calling (`run_module5.py`)
 - Method X: max pixel intensity per nucleus × channel × round
 - Nucleus mask shifted by M3 (dy, dx) into HybN frame for Hyb2/Hyb3 sampling
-- Result: 3687 rows (1230 nuclei × 3 rounds)
+- **2026-03-01**: Added `_apply_cross_round_correction()`:
+  - `_xr_bg = min(Ch_corr_Hyb2, Ch_corr_Hyb3, Ch_corr_Hyb4)` per nucleus per channel
+  - `_xr = max(Ch_corr − xr_bg, 0)` — removes cross-round carry-over and persistent fluorescence
+  - All 3 channels have `_xr_bg` and `_xr` columns in output for traceability
+- Result: 3687 rows (1230 nuclei × 3 rounds), columns include raw / `_bg` / `_corr` / `_xr_bg` / `_xr`
 - Output: `python_results/module5/spot_intensities.csv`
 
 ### ✅ Module 6 — Barcode Decoding (`run_module6.py`)
-- Argmax over 3 channels per round; `background_threshold=2000 ADU`
-- Result: **1059/1230 (86.1%) fully decoded**, 50 unique barcodes
-- Top barcodes: Purple-Yellow-Yellow (355), Yellow-Blue-Purple (186), Yellow-Yellow-Purple (180)
-- Output: `python_results/module6/barcodes.csv`
+- **Final correction mode (2026-03-01)**:
+  - Ch1_AF647: `_corr` (spatial bg subtraction only — no persistent protein)
+  - Ch2_AF590: `_xr` (cross-round mCherry correction)
+  - Ch3_AF488: `_corr` (spatial bg subtraction only — no persistent protein)
+  - Threshold: 500 ADU
+- Result: **1216/1230 (98.9%) fully decoded**, 14 None cells (1.1%), 22 unique barcodes
+- None population: biologically acknowledged — unlabeled cells, failed hybridization, or cells outside barcode library
+- Top barcodes: Purple-Yellow-Yellow (384), Yellow-Yellow-Purple (208), Yellow-Blue-Purple (165)
+- Output: `python_results/module6/barcodes.csv` (1230 rows, includes `decoded_ok` flag)
 
 ### ✅ Enhanced QC (`run_qc_enhanced.py`)
 - 8 figures in `python_results/qc/`:
-  - M5: channel scatter, SNR distribution, intensity heatmap
+  - M5: channel scatter (dual-high highlighted), SNR distribution, intensity heatmap, dual-high spatial map
   - M6: spot overlay (Hyb2/3/4), barcode count chart, confidence spatial map
 
----
-
-## Pending — QC Review & Parameter Tuning
-
-- [ ] Review `qc_m6_spot_overlay_Hyb4.png` — verify Purple nucleus = bright in AF647 (Red channel)
-- [ ] Review `qc_m6_barcode_counts.png` — do top barcodes match expected cell pool ratios?
-- [ ] Review `qc_m5_snr_distribution.png` — is `background_threshold=2000 ADU` appropriate?
-- [ ] Decide: adjust `background_threshold` in `config/module6_decoding.yaml` and re-run M6 + QC
-
----
-
-## Next Implementation Tasks (prioritised)
-
-### 1. QC — Add nucleus boundaries to spot overlay (quick, high value)
-- In `run_qc_enhanced.py → fig_spot_overlay()`, draw nucleus boundary contours on top of the colored fill
-- Use `skimage.segmentation.find_boundaries(labels)` to get 1-px boundary mask
-- Draw in white/light grey so boundaries are visible even when adjacent nuclei share a color
-- This makes it possible to see individual nucleus outlines when colors are the same
-
-### 2. Spot Calling — Add Method Y (Ronan-style) for cross-comparison
-- Implement in `src/module5_spot_calling/spot_caller.py` or as a separate `method_y_caller.py`
-- Ronan's logic per nucleus per channel: threshold = `cell_mean + 6 × cell_std` (capped at 65000)
-- Morphology: `measure.label(binary)` → `remove_small_objects(min_size=10)`
-- Signal = total puncta area (not max intensity)
-- Compare Method X vs Method Y: do they agree on which channel is brightest?
-- Output: `spot_intensities_methodY.csv` + side-by-side comparison figure
-
-### 3. Investigate the top-right population in M5 channel scatter
-- In Hyb4 scatter (Ch1_AF647 vs Ch3_AF488): a small cluster appears in the top-right
-  (both channels simultaneously high) — see discussion below
-- Action: identify which nucleus_ids fall in this cluster (define as: Ch1 > X AND Ch3 > X)
-- Check their spot overlay appearance, SNR, and barcode calls
-- Determine cause: incomplete washing vs debris vs registration artifact
-
-### 4. Cell ID mapping — Live → Hyb4 (Module 7 candidate)
-- Use M2 shift (dy=−0.20, dx=−0.20 px) to map Live cell centroids into Hyb4 frame
-- Input: Live nucleus segmentation (needs to be run on Live DAPI C00 image)
-- Output: mapping table `live_nucleus_id ↔ hyb4_nucleus_id` (nearest-centroid matching)
-- Allows linking Live cell morphology / timelapse data to the barcode assignment
+### ✅ Background Subtraction QC (`run_qc_bg_comparison.py`) — NEW 2026-03-01
+- 5 figures in `python_results/qc/`:
+  - `qc_bg_scatter_comparison.png` — raw vs corrected channel scatter
+  - `qc_bg_background_magnitude.png` — background pedestal analysis per channel per round
+  - `qc_bg_call_changes.png` — which cells changed call + transition matrix
+  - `qc_bg_snr_improvement.png` — SNR before vs after (aggregated per round)
+  - `qc_bg_snr_by_color.png` — SNR per color × per round 3×3 grid (NEW)
 
 ---
 
-## Pending — Analysis & Downstream
+## ✅ Completed Today (2026-03-01)
 
-- [ ] Map barcodes to drug/condition identity (requires barcode lookup table from experiment design)
-- [ ] Merge with Live nucleus IDs (task 4 above)
-- [ ] Per-condition statistics: cell count per barcode, spatial clustering analysis
-- [ ] Export figures for paper / presentation
+### mCherry Cross-Round Correction Pipeline
+1. **Diagnosed Blue contamination** — Ch2_AF590 (Blue) had false calls in Hyb2/Hyb4 because mCherry
+   fluorescent protein was not fully eliminated and persists across all imaging rounds
+2. **Confirmed imaging order**: Hyb4 → Hyb3 → Hyb2; mCherry bleaches 19.8% over this sequence
+3. **Created `run_mcherry_correction.py`** — standalone exploration script using mean(Ch2_Hyb4, Ch2_Hyb2)
+   as per-nucleus mCherry baseline for Hyb3 subtraction
+4. **Integrated into Module 5** — `_apply_cross_round_correction()` computes `_xr_bg` and `_xr` columns
+   for ALL 3 channels (for traceability and future flexibility)
+5. **Tested all-channel _xr in Module 6** — caused 22.8% None rate (281 cells) due to over-correction:
+   Ch1/Ch3 cross-round carry-over (~800 ADU) overlaps with borderline Purple/Yellow signals
+6. **Diagnosed None cell subtypes**:
+   - Type A (all rounds low signal): genuinely unlabeled cells → correct to call None
+   - Type B (2 strong rounds + 1 zeroed by _xr): over-correction artifact → should decode
+7. **Final decision**: Ch2_AF590 → `_xr`, Ch1/Ch3 → `_corr` (reverted to channel-specific approach)
+8. **Re-exported `barcodes.csv`**: 1216 decoded (98.9%), 14 None (1.1%) — biologically accepted
+9. **Regenerated all QC figures** (both `run_qc_enhanced.py` and `run_qc_bg_comparison.py`)
 
 ---
 
-## Science Discussion — Top-Right Population in M5 Channel Scatter
+## Next Session — Puncta Detection Cross-Comparison
 
-### Observation
-In `qc_m5_channel_scatter.png` (Hyb4 panel), there is a small population of nuclei
-in the top-right corner: **high Ch1_AF647 AND high Ch3_AF488 simultaneously**.
-These nuclei get an argmax call (whichever is slightly higher wins) but their SNR is low.
+### Goal
+Compare multiple puncta detection methods for Module 5 and determine which is most reliable
+for this smFISH dataset.
 
-### Possible causes (in order of likelihood)
+### Methods to compare
+- [ ] **Method X** (current): max pixel intensity per nucleus — simple, robust, no morphology assumptions
+- [ ] **Method Y** (Ronan-style): adaptive threshold (mean + 6σ per nucleus), puncta area measurement
+- [ ] **Method Z** (candidate): Laplacian of Gaussian (LoG) blob detection — scale-space spot finding
+- [ ] **Method W** (candidate): TrackPy / centroid-based spot detection with intensity filter
+- [ ] Possibly: `skimage.feature.peak_local_max` with distance_min filter
 
-1. **Incomplete washing / carry-over** ← most likely
-   - If washing between rounds was insufficient, residual AF647 or AF488 oligos
-     from a previous hybridization remain bound
-   - These nuclei have genuine signal in one channel but elevated background in another
-   - Typical indicator: the "extra bright" channel is consistent with carry-over direction
-   - Action: check if these nuclei have specific barcodes that suggest carry-over
+### Cross-comparison plan
+- [ ] Run all methods on same `spot_intensities` data (or raw images)
+- [ ] For each method: compute SNR, call concordance with Method X, fraction decoded
+- [ ] Identify nuclei where methods disagree — inspect raw images for ground truth
+- [ ] Define "best" metric: fraction decoded + SNR + agreement on high-confidence cells
+- [ ] Document final method choice and scientific rationale
 
-2. **Autofluorescence hotspots**
-   - Some cells (especially stressed or dying cells) have elevated autofluorescence
-     across multiple channels simultaneously
-   - Autofluorescence is typically broad-spectrum → lights up all channels equally
-   - Indicator: all 3 channels bright, not just 2
-
-3. **Registration artifact (less likely)**
-   - If the nucleus mask slightly overlaps a neighboring nucleus that has a different color
-   - Would cause both max intensities to be high (sampling from two cells)
-   - More likely at cell boundaries; check spatial position of these nuclei
-
-4. **True biology (unlikely but possible)**
-   - In theory, a cell could legitimately have two spots if barcoding failed
-   - Would indicate a cell that received two oligo pools — possible but unlikely in well-controlled experiments
-
-### Recommended handling
-- Flag these nuclei: define as dual-high if both Ch1 and Ch3 > (e.g.) 15000 ADU
-- Tag them as `dual_high=True` in barcodes.csv
-- Do NOT automatically exclude — report them separately for biological interpretation
-- Cross-check with Method Y: does Ronan-style also find signal in both channels?
+### Pending items from previous session
+- [ ] Cross-reference `dual_high_nucleus_ids.csv` with Method Y discordant nuclei
+- [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
+- [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
+- [ ] Per-condition statistics: cell count per barcode, spatial clustering
 
 ---
 
@@ -172,5 +152,4 @@ These nuclei get an argmax call (whichever is slightly higher wins) but their SN
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)
 - Working branch: `feat/module2-live-hyb4-registration` (all 6 modules + QC committed here)
-- Latest commit: `e3d02e4` — enhanced QC visualizations
 - Never commit: `*.tif`, `*.npy`, `*.czi`, `IMAGES/`, `*.csv`, `*.png`
