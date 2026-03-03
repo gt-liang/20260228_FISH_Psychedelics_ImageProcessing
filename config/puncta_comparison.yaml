@@ -1,0 +1,76 @@
+# Puncta Detection Method Comparison Configuration
+# =================================================
+# Runs 6 puncta detection methods on the same smFISH data and
+# compares decoded rate, SNR, barcode distribution, and pairwise agreement.
+#
+# Methods:
+#   X — max pixel intensity (current Module 5 primary method)
+#   Y — adaptive threshold (mean + n_sigma*std), integrated intensity
+#   Z — Laplacian of Gaussian (LoG) blob detection
+#   W — Difference of Gaussians (DoG) blob detection
+#   T — TrackPy Crocker-Grier centroid (spot mass)
+#   P — Gaussian pre-filter + peak_local_max
+#
+# All image-based methods (Y/Z/W/T/P) use spatially bg-corrected crops
+# (same _corr subtraction as Module 5) before detection.
+# Method X reads directly from spot_intensities.csv.
+
+input:
+  # Module 1 — Hyb4 pre-cropped fluorescence channels
+  hyb4_ch1_path: "python_results/module1/hyb4_crop_Ch1_AF647.npy"
+  hyb4_ch2_path: "python_results/module1/hyb4_crop_Ch2_AF590.npy"
+  hyb4_ch3_path: "python_results/module1/hyb4_crop_Ch3_AF488.npy"
+
+  # Module 1 — crop coordinates (for ICC image cropping)
+  crop_coords_path: "python_results/module1/crop_coords.json"
+
+  # Module 3 — Hyb2/Hyb3 ICC_Processed TIF files (full 20x tiled)
+  hyb2_icc_path: "IMAGES/20260123_psy_redo_3 hyb2_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+  hyb3_icc_path: "IMAGES/20260123_psy_redo_3 hyb3_B7-20x-3x3-Z-FOVB_ICC_Processed001.tif"
+
+  # Module 3 — registration offsets (dy, dx) for Hyb2/Hyb3 → Hyb4
+  reg_hyb2_path: "python_results/module3/registration_hyb2_to_hyb4.json"
+  reg_hyb3_path: "python_results/module3/registration_hyb3_to_hyb4.json"
+
+  # Module 4 — nucleus masks and properties
+  nucleus_labels_path: "python_results/module4/nucleus_labels.npy"
+  nucleus_props_path:  "python_results/module4/nucleus_properties.csv"
+
+  # Module 5 — pre-computed intensities (for Method X + bg scalars)
+  spot_intensities_path: "python_results/module5/spot_intensities.csv"
+
+processing:
+  # Which methods to run (subset of X, Y, Z, W, T, P)
+  methods: ["X", "Y", "Z", "W", "T", "P"]
+
+  # ICC channel Z-indices (FIJI export: Z encodes 5 channels, not z-planes)
+  icc_channels:
+    Ch1_AF647: 3
+    Ch2_AF590: 1
+    Ch3_AF488: 2
+
+  # Per-method tuning parameters
+  method_params:
+    Y:
+      n_sigma: 6.0          # adaptive threshold = mean + 6*std
+
+    Z:
+      min_sigma: 1.0        # LoG min scale (px) — smaller than expected spot radius
+      max_sigma: 4.0        # LoG max scale (px) — larger than expected spot radius
+      log_threshold: 0.02   # normalised response threshold (0–1)
+
+    W:
+      min_sigma: 1.0        # DoG min scale (px)
+      max_sigma: 4.0        # DoG max scale (px)
+      dog_threshold: 0.02   # normalised response threshold
+
+    T:
+      diameter: 5           # odd integer px — approx spot diameter at 20x
+                            # spot area ~14 px² → radius ~2 px → diameter 5
+
+    P:
+      sigma: 1.0            # Gaussian pre-filter sigma (px)
+      min_distance: 3       # minimum distance between peaks (px)
+
+output:
+  results_dir: "python_results/puncta_comparison"

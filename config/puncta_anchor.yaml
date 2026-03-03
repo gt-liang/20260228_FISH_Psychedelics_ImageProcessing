@@ -1,0 +1,32 @@
+# Puncta Anchor Validation Pipeline Configuration
+# ================================================
+# Uses Hyb4 as a calibration round:
+#   1. Detect all puncta positions in Hyb4 (LoG on max-projection of 3 channels)
+#   2. Cross-reference each position in Hyb3 + Hyb2 (signal in search_radius window)
+#   3. Validate: position must have signal above min_signal in both HybN rounds
+#
+# Biological rationale:
+#   smFISH mRNA molecules are spatially fixed between rounds.
+#   Only the probe color changes. A true signal must appear at the same (y, x)
+#   in every round. Anchoring on Hyb4 eliminates noise from other positions.
+
+detection:
+  min_sigma: 1.0        # LoG min scale (px) — lower bound of spot radius
+  max_sigma: 4.0        # LoG max scale (px) — upper bound of spot radius
+  log_threshold: 0.02   # Normalised LoG response threshold (0–1).
+                        # Lower = more sensitive (more candidates).
+                        # Increase if too many spurious detections appear.
+
+validation:
+  search_radius: 3      # Pixel radius window around Hyb4 position to
+                        # search for signal in Hyb3/Hyb2.
+                        # Accounts for residual sub-pixel registration error.
+  min_signal: 300       # ADU threshold: signal at a candidate position must
+                        # exceed this in at least one channel to be "confirmed".
+                        # Consistent with Module 6 threshold (500 ADU max-pixel;
+                        # 300 here because we sample a small window, not full nucleus).
+
+output:
+  results_dir: "python_results/puncta_anchor"
+  save_figures: true    # Export one QC PNG per nucleus
+  figure_dpi: 100

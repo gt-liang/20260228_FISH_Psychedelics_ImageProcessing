@@ -241,10 +241,73 @@ xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negativ
 
 ---
 
+## Puncta Comparison Lessons (2026-03-02)
+
+### 6-method comparison summary
+- All 6 methods agree on easy nuclei (strong, well-isolated signal)
+- Z (LoG) and W (DoG) have highest decoded rate (99.7%) but lower SNR than Y
+- Y (adaptive threshold) has highest SNR (30.6) but lowest decoded rate (95.7%) — often returns 0 on dim cells
+- Method X (current primary) balanced: 98.9% decoded, SNR 10.7
+- Z↔W pairwise agreement 93.3% (most similar); X↔Y only 74.1% (most different)
+- Disagreement QC: 415/1230 nuclei show ≥2 conflicting calls → manual review needed
+
+### matplotlib table: cellColours must NOT include header row
+- `ax.table(colLabels=..., cellColours=cell_colors)`: `cell_colors` must have ONLY data rows
+- Adding a header row to cell_colors causes ValueError (shape mismatch)
+- Always: `cell_colors = []` then `cell_colors.append(row)` for data rows only
+
+### Disagreement QC visualization
+- Use centroid-based crop (radius = sqrt(area_px/π) + 25px) — NOT bbox-based
+  - Bbox from shifted labels can be partially out-of-frame → nucleus cut off
+  - Centroid is stable and always centers the nucleus
+- Color-tint channel panels by fluorophore color (not grayscale) for biological intuition
+- Merged RGB composite: R=Ch1(Purple), G=Ch3(Yellow), B=Ch2(Blue)
+- Output to `python_results/puncta_comparison/disagreement_crops/`, sort descending by ndiff
+
+---
+
+## Puncta Anchor Pipeline Lessons (2026-03-02)
+
+### LoG threshold 0.02 is far too sensitive for smFISH
+- `blob_log(norm, threshold=0.02)` on nucleus max-projection: avg 24.5 blobs/nucleus
+- For smFISH, expect 1–3 puncta per nucleus (one RNA per cell)
+- **Start at log_threshold=0.10**; increase to 0.15–0.20 if still too many detections
+- Rule of thumb: threshold ~ 5–10% of normalized max intensity
+
+### Fixed-size canvas is essential for multi-round visualization
+- Problem: cropping `image[max(0, cy-r):min(H, cy+r)]` gives different sizes when nucleus
+  is near image edge → imshow stretches to fill panel → inconsistent apparent zoom
+- Solution: always create a `(2r × 2r)` canvas, zero-pad where out of bounds, paste actual crop
+  ```python
+  canvas = np.zeros((2*r, 2*r))
+  r0_req = cy - r  # may be negative
+  r0_act = max(0, r0_req)
+  canvas[r0_act - r0_req: ...] = image[r0_act: ...]
+  ```
+- Canvas top-left corner in global coords = (r0_req, c0_req), potentially negative
+- Circle positions: `x_canvas = x_global - c0_req` (works correctly even when c0_req < 0)
+
+### Table height must be capped in matplotlib gridspec
+- `height_ratios=[1,1,1, 0.3 + 0.28*n]` with n=24 → table takes 70% of figure height
+- Fix: cap height_ratios table value at ~1.1; cap displayed rows at `MAX_TABLE_ROWS=10`
+- Add "… N more not shown" text note below table when candidates are truncated
+
+### Puncta anchor coordinate formula (confirmed)
+- Registration (dy, dx) from M3 = "shift HybN by (dy, dx) to align to Hyb4"
+- `shift_labels` applies `ndimage_shift(labels, shift=(-dy, -dx))`
+- A pixel at (y, x) in Hyb4 → at (y − dy, x − dx) in HybN image
+- Same formula for both display crops AND puncta position cross-referencing
+
+### Search radius for cross-round position matching
+- SEARCH_RADIUS=3px accounts for residual sub-pixel registration error after Phase Correlation
+- If registration quality is good (Pearson r > 0.3), 3px is sufficient
+- If many false negatives (confirmed_h3/h2 rate < 50%), increase to 5px
+
+---
+
 ## Repo / GitHub
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)
 - gh CLI: user `gt-liang`, authenticated via browser
-- Branch naming: `wip/<topic>`, `feat/<topic>`, `fix/<topic>`
-- Working branch: `feat/module2-live-hyb4-registration` (contains M2–M6 + QC)
+- Branch: **`main`** (direct push — solo research, no feature branches needed)
 - Never commit: `*.tif`, `*.npy`, `*.czi`, `IMAGES/`, `*.csv`, `*.png`

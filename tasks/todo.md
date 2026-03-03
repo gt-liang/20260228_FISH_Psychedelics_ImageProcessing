@@ -1,6 +1,6 @@
 # FISH Psychedelics Image Processing - Task List
-**Last Updated**: 2026-03-01
-**Status**: Full pipeline implemented + mCherry cross-round correction ✅
+**Last Updated**: 2026-03-02
+**Status**: Full pipeline + mCherry correction + Puncta Anchor Pipeline (trial run complete) ✅
 
 ---
 
@@ -120,28 +120,69 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 
 ---
 
-## Next Session — Puncta Detection Cross-Comparison
+## ✅ Completed Today (2026-03-02)
 
-### Goal
-Compare multiple puncta detection methods for Module 5 and determine which is most reliable
-for this smFISH dataset.
+### Puncta Detection Cross-Comparison (6 Methods)
+1. **Implemented `src/puncta_comparison/`** — `methods.py` + `comparator.py` + `__init__.py`
+   - 6 methods: X (max pixel), Y (adaptive thresh), Z (LoG), W (DoG), T (TrackPy), P (peak_local_max)
+   - Each method: `(crop, mask, **params) → float signal` for one nucleus × channel × round
+2. **Config**: `config/puncta_comparison.yaml` (all parameters, image paths, output dir)
+3. **Entry point**: `run_puncta_comparison.py` → QC figures + comparison_table.csv
+4. **Results**:
+   | Method | Decoded% | SNR median |
+   |--------|----------|-----------|
+   | X (max pixel)   | 98.9% | 10.7 |
+   | Y (adaptive thr)| 95.7% | 30.6 |
+   | Z (LoG)         | 99.7% |  8.4 |
+   | W (DoG)         | 99.7% |  8.6 |
+   | T (TrackPy)     | 97.0% | 11.6 |
+   | P (peak_max)    | 99.4% |  9.2 |
+   - Z↔W highest pairwise agreement (93.3%); X↔Y lowest (74.1%)
+5. **Disagreement QC** — `run_puncta_qc_disagreement.py`: 415 PNGs for nuclei where ≥2 methods disagree
+   - v2: color-tinted channel panels + merged RGB composite + centroid-based crop
+   - Layout: 3 rounds × 4 columns (Ch1/Ch2/Ch3/Merged) + method call table
 
-### Methods to compare
-- [ ] **Method X** (current): max pixel intensity per nucleus — simple, robust, no morphology assumptions
-- [ ] **Method Y** (Ronan-style): adaptive threshold (mean + 6σ per nucleus), puncta area measurement
-- [ ] **Method Z** (candidate): Laplacian of Gaussian (LoG) blob detection — scale-space spot finding
-- [ ] **Method W** (candidate): TrackPy / centroid-based spot detection with intensity filter
-- [ ] Possibly: `skimage.feature.peak_local_max` with distance_min filter
+### Puncta Anchor Validation Pipeline (NEW)
+6. **Biological rationale**: mRNA position fixed between rounds → use Hyb4 positions to anchor cross-round validation
+7. **Implemented `run_puncta_anchor.py`** — standalone pipeline:
+   - Step 1: LoG on max(Ch1, Ch2, Ch3) per nucleus in Hyb4 → candidate positions
+   - Step 2: Cross-reference each position in Hyb3/Hyb2 (search_radius=3px window)
+   - Step 3: Color = argmax per round; confirmed = max ≥ 300 ADU
+   - Step 4: QC figure per nucleus (3×4 grid + puncta circles + candidate table)
+8. **Config**: `config/puncta_anchor.yaml`
+9. **Trial run result** (log_threshold=0.02): avg 24.5 candidates/nucleus — LoG too sensitive
+   - Caused 100% decoded rate (false positive: every nucleus has at least one noise blob)
+   - Root cause: log_threshold=0.02 detects noise as blobs; needs tuning (try 0.10–0.15)
+10. **Layout v2 fixes** — fixed canvas + table cap:
+    - `_crop_canvas()`: fixed 2r×2r zero-padded canvas → consistent crop size across rounds
+    - Table capped at 10 rows; figure height fixed at 11 inches (table can't cover image panels)
+    - Circle positioning updated to canvas coordinate system
 
-### Cross-comparison plan
-- [ ] Run all methods on same `spot_intensities` data (or raw images)
-- [ ] For each method: compute SNR, call concordance with Method X, fraction decoded
-- [ ] Identify nuclei where methods disagree — inspect raw images for ground truth
-- [ ] Define "best" metric: fraction decoded + SNR + agreement on high-confidence cells
-- [ ] Document final method choice and scientific rationale
+---
 
-### Pending items from previous session
-- [ ] Cross-reference `dual_high_nucleus_ids.csv` with Method Y discordant nuclei
+## 🔜 Next Session — Anchor Pipeline Tuning
+
+### Priority review (tomorrow)
+- [ ] Open `python_results/puncta_anchor/nucleus_crops/` — inspect 5–10 single-candidate nuclei (n_candidates=1)
+  - Confirm white circle lands on the real smFISH spot in Hyb4
+  - Confirm green circles appear in correct Hyb3/Hyb2 positions
+- [ ] Open nuclei with n_candidates ≥ 3 — count false detections vs real spots
+- [ ] Decide threshold adjustment: try `log_threshold: 0.10` then 0.15 if still too many
+
+### Tuning approach
+```yaml
+# config/puncta_anchor.yaml — adjust these:
+detection:
+  log_threshold: 0.10   # raise from 0.02 → expect ~1–3 candidates/nucleus
+validation:
+  min_signal: 300       # may need to tune after seeing confirmed rates
+```
+- Goal: avg candidates/nucleus ≈ 1–3; confirmed_h3 AND confirmed_h2 rate ≈ 90%+
+
+### After threshold tuning
+- [ ] Compare `anchor_summary.csv` decoded barcode vs `module6/barcodes.csv` — how many match?
+- [ ] Nuclei where anchor disagrees with Module 6: inspect QC crops for ground truth
+- [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
 - [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
 - [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
 - [ ] Per-condition statistics: cell count per barcode, spatial clustering
@@ -151,5 +192,5 @@ for this smFISH dataset.
 ## Git / GitHub
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)
-- Working branch: `feat/module2-live-hyb4-registration` (all 6 modules + QC committed here)
+- Branch: **`main`** (direct push — solo research workflow)
 - Never commit: `*.tif`, `*.npy`, `*.czi`, `IMAGES/`, `*.csv`, `*.png`

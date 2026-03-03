@@ -155,7 +155,7 @@ class Decoder:
         """
         Decode all 3 rounds for all nuclei and assemble the barcode table.
 
-        Barcode string format: "Color2-Color3-Color4"
+        Barcode string format: "Color4-Color3-Color2"  (experimental order: Hyb4 → Hyb3 → Hyb2)
         e.g. "Purple-Yellow-Blue"
 
         A nucleus is flagged decoded_ok=False if ANY round is "None".
@@ -185,8 +185,8 @@ class Decoder:
         for rnd, series in round_series.items():
             df_decode[f"color_{rnd.lower()}"] = df_decode["nucleus_id"].map(series).fillna(self.no_signal)
 
-        # Build barcode string
-        round_cols = [f"color_{r.lower()}" for r in ["Hyb2", "Hyb3", "Hyb4"]
+        # Build barcode string — experimental order: Hyb4 (first imaged) → Hyb3 → Hyb2
+        round_cols = [f"color_{r.lower()}" for r in ["Hyb4", "Hyb3", "Hyb2"]
                       if f"color_{r.lower()}" in df_decode.columns]
         df_decode["barcode"] = df_decode[round_cols].apply(
             lambda row: "-".join(row.values), axis=1
