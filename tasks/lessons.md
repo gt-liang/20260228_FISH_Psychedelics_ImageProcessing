@@ -215,6 +215,35 @@ xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negativ
 - Cross-check with Method Y: if both channels show area > 0 → real carry-over signal;
   if both areas = 0 → elevated background/autofluorescence, not true puncta
 
+## Puncta Anchor Pipeline Lessons (2026-03-03)
+
+### SNR filter: use peak-inside / mean-outside, NOT mean-inside / mean-outside
+- **Problem**: `mean(inside) / mean(outside)` gives ratio ≈ 1.5–2 even for real smFISH spots
+- **Root cause**: blob disk (radius = √2×sigma ≈ 2 px) contains ~12 pixels; only 3-4 center
+  pixels are truly bright. Background pixels within the disk drag the mean down 3–5×.
+- **Fix**: use `max(inside) / mean(outside)` = peak-to-background ratio (standard in FISH literature)
+- **Rule**: NEVER use mean-inside for punctum detection — always peak or 95th percentile
+
+### SNR threshold 10 (mean/mean) → 0 candidates: calibration order matters
+- Sequence: calibrate `log_threshold` FIRST → then layer SNR filter on top
+- At log_threshold=0.02 (too sensitive), SNR=10 filtered everything (even real spots have SNR≈2 mean/mean)
+- Correct order: (1) tune LoG threshold until avg candidates ≈ 1–3, (2) then add SNR filter
+
+### LoG threshold calibration results for this dataset
+| Threshold | Avg candidates | 0-candidate nuclei | Assessment |
+|-----------|---------------|-------------------|------------|
+| 0.02 | 24.54 | 0 | Too sensitive — detects noise |
+| 0.10 | 5.02 | 0 | Better, still too many |
+| **0.20** | **1.54** | **2** | **Best — 79% cells have 1 candidate** |
+- Dataset: 1230 nuclei, B7-FOVB FOV, 20× objective, smFISH mRNA detection
+- Threshold=0.20 is a good starting point for similar smFISH experiments at this magnification
+
+### Variable circle radius = √2 × sigma (clamped 4–20 px)
+- `blob_log` returns (y, x, sigma) for each blob
+- Standard blob radius formula: r = √2 × sigma
+- Clamp to [4, 20] px so circles remain visible regardless of blob size
+- This gives visual feedback on how "spread out" each detected spot is
+
 ## QC & Visualization Lessons
 
 ### Spot overlay: vectorise mask coloring with LUT

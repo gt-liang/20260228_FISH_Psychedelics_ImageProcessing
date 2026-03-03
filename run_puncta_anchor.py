@@ -67,6 +67,7 @@ LOG_MAX_SIGMA  = float(_CFG["detection"]["max_sigma"])
 LOG_THRESHOLD  = float(_CFG["detection"]["log_threshold"])
 SEARCH_RADIUS  = int(_CFG["validation"]["search_radius"])
 MIN_SIGNAL     = float(_CFG["validation"]["min_signal"])
+MIN_SNR_RATIO  = float(_CFG["validation"].get("min_snr_ratio", 10.0))
 FIG_DPI        = int(_CFG["output"].get("figure_dpi", 100))
 SAVE_FIGURES   = bool(_CFG["output"].get("save_figures", True))
 
@@ -186,6 +187,70 @@ def hybn_position(y_h4: float, x_h4: float,
     return y_h4 - dy, x_h4 - dx
 
 
+# ── SNR helper ────────────────────────────────────────────────────────────────
+def _compute_snr(image: np.ndarray, mask: np.ndarray,
+                 yc: int, xc: int, r_blob: float) -> float:
+    """
+    Compute inside/outside fluorescence ratio for a detected blob.
+
+    Scientific logic
+    ----------------
+    A genuine smFISH punctum is a diffraction-limited bright focus.
+    Its intensity should be highly concentrated (≥10× the local nuclear
+    background).  Noise blobs (from texture, autofluorescence, or imaging
+    artifacts) look similar in shape to real spots but lack this contrast.
+
+    inside  = mean intensity within a disk of radius r_blob centred on (yc, xc),
+              restricted to nucleus pixels.
+    outside = mean intensity in the annulus (r_blob, 2×r_blob), restricted to
+              nucleus pixels.  This is the local nuclear background immediately
+              surrounding the punctum.
+    Fallback: if the annulus contains no nucleus pixels (e.g. blob near the
+              nucleus edge), use all nucleus pixels outside the blob disk.
+
+    Parameters
+    ----------
+    image  : 2D float array, max-projection within nucleus (zeros outside mask)
+    mask   : 2D bool array, True = nucleus pixel
+    yc, xc : blob centre in image/crop coordinates
+    r_blob : blob radius = sqrt(2) × sigma from LoG
+
+    Returns
+    -------
+    float — inside/outside ratio (0 if undetermined, inf if outside_mean ≈ 0)
+    """
+    H, W = image.shape
+    ys_grid, xs_grid = np.ogrid[:H, :W]
+    dist = np.sqrt((ys_grid - yc) ** 2 + (xs_grid - xc) ** 2)
+
+    inside_mask  = (dist <= r_blob) & mask
+    annulus_mask = (dist > r_blob) & (dist <= 2.0 * r_blob) & mask
+
+    if not inside_mask.any():
+        return 0.0
+
+    # Peak-to-background ratio: standard in smFISH / FISH literature.
+    # Using the peak (max) inside instead of mean avoids the dilution problem
+    # where background pixels within the blob disk drag the mean down.
+    # A genuine diffraction-limited punctum has a very bright single pixel
+    # at its centre; mean-inside would underestimate this by 3-5×.
+    peak_inside = float(image[inside_mask].max())
+
+    if annulus_mask.any():
+        outside_mean = float(image[annulus_mask].mean())
+    else:
+        # Fallback: all nucleus pixels not inside the blob
+        fallback_mask = mask & ~inside_mask
+        if not fallback_mask.any():
+            return 0.0
+        outside_mean = float(image[fallback_mask].mean())
+
+    if outside_mean < 1.0:
+        return float("inf") if peak_inside > 0 else 0.0
+
+    return peak_inside / outside_mean
+
+
 # ── Step 1: Hyb4 detection ────────────────────────────────────────────────────
 def detect_positions_hyb4(images_hyb4: dict,
                            nucleus_mask: np.ndarray) -> list:
@@ -205,7 +270,9 @@ def detect_positions_hyb4(images_hyb4: dict,
 
     Returns
     -------
-    List of (y_global, x_global) integer tuples in full-image coordinates.
+    List of (y_global, x_global, sigma, snr) tuples.
+      sigma : LoG scale parameter; blob radius = sqrt(2) × sigma (px)
+      snr   : inside/outside fluorescence ratio (MIN_SNR_RATIO filter already applied)
     """
     ys, xs = np.where(nucleus_mask)
     if len(ys) == 0:
@@ -240,14 +307,23 @@ def detect_positions_hyb4(images_hyb4: dict,
             threshold=LOG_THRESHOLD,
         )
 
-    # Convert crop-local coordinates → global image coordinates, filter to mask
+    # Convert crop-local coordinates → global image coordinates,
+    # filter to mask, and apply SNR ratio threshold.
     positions = []
     for blob in blobs:
-        y_c, x_c = int(round(blob[0])), int(round(blob[1]))
-        if (0 <= y_c < mask_crop.shape[0] and
+        y_c, x_c, sigma = int(round(blob[0])), int(round(blob[1])), float(blob[2])
+        if not (0 <= y_c < mask_crop.shape[0] and
                 0 <= x_c < mask_crop.shape[1] and
                 mask_crop[y_c, x_c]):
-            positions.append((y_c + r0, x_c + c0))
+            continue
+
+        # SNR filter: inside-to-outside fluorescence ratio
+        r_blob = np.sqrt(2.0) * sigma
+        snr = _compute_snr(max_proj_masked, mask_crop, y_c, x_c, r_blob)
+        if snr < MIN_SNR_RATIO:
+            continue   # not a genuine punctum — discard
+
+        positions.append((y_c + r0, x_c + c0, sigma, snr))
 
     return positions
 
@@ -359,6 +435,11 @@ def _draw_puncta_circles(ax, candidates: list, rnd: str,
     for idx, cand in enumerate(candidates):
         y_h4, x_h4 = cand["y_h4"], cand["x_h4"]
 
+        # Circle radius scales with detected blob size: r = √2 × sigma (px)
+        # Clamp to [4, 20] px so circles remain visible on the crop canvas.
+        sigma = cand.get("sigma_h4", 3.0)
+        circle_r = float(np.clip(np.sqrt(2.0) * sigma, 4, 20))
+
         if rnd == "Hyb4":
             y_plot = y_h4 - r0_req
             x_plot = x_h4 - c0_req
@@ -370,12 +451,12 @@ def _draw_puncta_circles(ax, candidates: list, rnd: str,
             edge_color = "#00EE44" if cand.get(confirmed_key, False) else "#FF3333"
 
         circle = plt.Circle(
-            (x_plot, y_plot), radius=6,
+            (x_plot, y_plot), radius=circle_r,
             fill=False, edgecolor=edge_color, linewidth=1.5, zorder=5
         )
         ax.add_patch(circle)
         ax.text(
-            x_plot + 8, y_plot - 8, str(idx + 1),
+            x_plot + circle_r + 2, y_plot - circle_r - 2, str(idx + 1),
             color=edge_color, fontsize=6, fontweight="bold",
             ha="left", va="top", zorder=6
         )
@@ -509,7 +590,7 @@ def make_nucleus_figure(
         n_hidden    = n_cands - len(cands_shown)
 
         col_lbls = [
-            "#", "Pos (y,x)", "H4 color", "H4 max",
+            "#", "Pos (y,x)", "H4 color", "H4 max", "SNR",
             "H3 color", "H3 max", "H2 color", "H2 max",
             "H3 ✓", "H2 ✓", "Barcode",
         ]
@@ -517,10 +598,12 @@ def make_nucleus_figure(
         cell_colors = []
 
         for idx, cand in enumerate(cands_shown):
+            snr_val = cand.get("snr_h4", float("nan"))
+            snr_str = f"{snr_val:.1f}" if np.isfinite(snr_val) else "∞"
             row = [
                 str(idx + 1),
                 f"{cand['y_h4']}, {cand['x_h4']}",
-                cand["color_h4"], f"{cand['max_h4']:.0f}",
+                cand["color_h4"], f"{cand['max_h4']:.0f}", snr_str,
                 cand["color_h3"], f"{cand['max_h3']:.0f}",
                 cand["color_h2"], f"{cand['max_h2']:.0f}",
                 "✓" if cand["confirmed_h3"] else "✗",
@@ -529,7 +612,7 @@ def make_nucleus_figure(
             ]
             c = [
                 "#DDDDDD", "#EEEEEE",
-                COLOR_DISPLAY.get(cand["color_h4"], "#FFFFFF"), "#EEEEEE",
+                COLOR_DISPLAY.get(cand["color_h4"], "#FFFFFF"), "#EEEEEE", "#EEEEEE",
                 COLOR_DISPLAY.get(cand["color_h3"], "#FFFFFF"), "#EEEEEE",
                 COLOR_DISPLAY.get(cand["color_h2"], "#FFFFFF"), "#EEEEEE",
                 "#90EE90" if cand["confirmed_h3"] else "#FFB6C1",
@@ -562,7 +645,8 @@ def make_nucleus_figure(
     fig.suptitle(
         f"Nucleus {nid}  |  centroid=({cx}, {cy})  |  "
         f"{n_cands} Hyb4 candidate(s)  "
-        f"[LoG thr={LOG_THRESHOLD}  search_r={SEARCH_RADIUS}px  min_sig={MIN_SIGNAL:.0f}]",
+        f"[LoG thr={LOG_THRESHOLD}  SNR≥{MIN_SNR_RATIO:.0f}  "
+        f"search_r={SEARCH_RADIUS}px  min_sig={MIN_SIGNAL:.0f}]",
         fontsize=9, fontweight="bold", y=0.99,
     )
     return fig
@@ -575,7 +659,8 @@ def main():
     logger.info(f"  Detection : LoG  min_σ={LOG_MIN_SIGMA}  max_σ={LOG_MAX_SIGMA}"
                 f"  threshold={LOG_THRESHOLD}")
     logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px"
-                f"  min_signal={MIN_SIGNAL:.0f} ADU")
+                f"  min_signal={MIN_SIGNAL:.0f} ADU"
+                f"  min_snr_ratio={MIN_SNR_RATIO:.1f}")
     logger.info("=" * 65)
 
     images   = load_all_images()
@@ -606,7 +691,7 @@ def main():
 
         # ── Step 2 & 3: Measure signals in all rounds per candidate ───────
         candidates: list[dict] = []
-        for cand_idx, (y_h4, x_h4) in enumerate(positions):
+        for cand_idx, (y_h4, x_h4, sigma, snr) in enumerate(positions):
             signals      = measure_round_signals(images, regs, y_h4, x_h4)
             color_h4, max_h4 = call_color(signals["Hyb4"])
             color_h3, max_h3 = call_color(signals["Hyb3"])
@@ -626,6 +711,8 @@ def main():
                 candidate_id = cand_idx + 1,
                 y_h4         = y_h4,
                 x_h4         = x_h4,
+                sigma_h4     = round(sigma, 2),   # LoG scale; blob radius = √2 × sigma
+                snr_h4       = round(snr, 2),      # inside/outside fluorescence ratio
                 # Raw channel signals (useful for threshold-tuning)
                 ch1_h4 = signals["Hyb4"]["Ch1_AF647"],
                 ch2_h4 = signals["Hyb4"]["Ch2_AF590"],

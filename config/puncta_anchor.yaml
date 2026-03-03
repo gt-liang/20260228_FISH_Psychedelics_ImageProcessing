@@ -13,9 +13,11 @@
 detection:
   min_sigma: 1.0        # LoG min scale (px) — lower bound of spot radius
   max_sigma: 4.0        # LoG max scale (px) — upper bound of spot radius
-  log_threshold: 0.02   # Normalised LoG response threshold (0–1).
+  log_threshold: 0.20   # Normalised LoG response threshold (0–1).
                         # Lower = more sensitive (more candidates).
-                        # Increase if too many spurious detections appear.
+                        # 0.02 was too sensitive (avg 24.5 blobs/nucleus — mostly noise).
+                        # 0.10 gave avg 5.0 blobs/nucleus — still too many.
+                        # 0.20 under test now.
 
 validation:
   search_radius: 3      # Pixel radius window around Hyb4 position to
@@ -25,6 +27,10 @@ validation:
                         # exceed this in at least one channel to be "confirmed".
                         # Consistent with Module 6 threshold (500 ADU max-pixel;
                         # 300 here because we sample a small window, not full nucleus).
+  min_snr_ratio: 0.0    # Peak-inside / mean-outside fluorescence ratio threshold.
+                        # 0.0 = DISABLED (all candidates pass regardless of SNR).
+                        # Set to e.g. 3.0–5.0 to filter low-contrast noise blobs.
+                        # Disabled for now while calibrating log_threshold first.
 
 output:
   results_dir: "python_results/puncta_anchor"

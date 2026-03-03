@@ -160,28 +160,47 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 
 ---
 
-## 🔜 Next Session — Anchor Pipeline Tuning
+## ✅ Completed Today (2026-03-03)
 
-### Priority review (tomorrow)
-- [ ] Open `python_results/puncta_anchor/nucleus_crops/` — inspect 5–10 single-candidate nuclei (n_candidates=1)
-  - Confirm white circle lands on the real smFISH spot in Hyb4
-  - Confirm green circles appear in correct Hyb3/Hyb2 positions
-- [ ] Open nuclei with n_candidates ≥ 3 — count false detections vs real spots
-- [ ] Decide threshold adjustment: try `log_threshold: 0.10` then 0.15 if still too many
+### Anchor Pipeline — SNR filter + Variable circle sizes + Threshold calibration
+1. **Added `_compute_snr()`** — peak-inside / mean-outside fluorescence ratio
+   - inside: max pixel within blob radius (√2 × sigma) within nucleus mask
+   - outside: mean of annulus (blob_r → 2×blob_r) within nucleus mask
+   - Fallback: all nucleus pixels outside blob if annulus is empty
+2. **Variable circle sizes** — circles now scale with blob sigma (radius = √2 × sigma, clamped 4–20 px)
+3. **SNR threshold tuning attempts**:
+   - `min_snr_ratio=10.0` (mean/mean formula) → 0 candidates (too strict, dilution problem)
+   - Fixed to peak/mean → more appropriate but still set to `0.0` (disabled) for now
+   - Lesson: calibrate log_threshold FIRST, then add SNR filter on top
+4. **LoG threshold calibration**:
+   | Threshold | Avg candidates | 0-candidate nuclei |
+   |-----------|---------------|-------------------|
+   | 0.02 | 24.54 | 0 |
+   | 0.10 | 5.02 | 0 |
+   | **0.20** | **1.54** | **2** ← best |
+   - **Current setting: `log_threshold: 0.20`** (avg 1.54, 79% of cells have exactly 1 candidate)
+5. **Table**: Added SNR column; barcode string now shown per candidate
+6. **Figure title**: shows `SNR≥{min_snr_ratio}` for parameter traceability
 
-### Tuning approach
-```yaml
-# config/puncta_anchor.yaml — adjust these:
-detection:
-  log_threshold: 0.10   # raise from 0.02 → expect ~1–3 candidates/nucleus
-validation:
-  min_signal: 300       # may need to tune after seeing confirmed rates
-```
-- Goal: avg candidates/nucleus ≈ 1–3; confirmed_h3 AND confirmed_h2 rate ≈ 90%+
+---
 
-### After threshold tuning
-- [ ] Compare `anchor_summary.csv` decoded barcode vs `module6/barcodes.csv` — how many match?
-- [ ] Nuclei where anchor disagrees with Module 6: inspect QC crops for ground truth
+## 🔜 Next Session — Scientific Discussion + SNR Implementation
+
+### Open scientific questions (discuss with PI)
+1. **"None" definition**: When should a nucleus be classified as having NO signal in a given round?
+   - Current: `max(Ch1, Ch2, Ch3) < 300 ADU` → "None"
+   - Alternative: require confirmed punctum in Hyb4 position to be absent in both HybN rounds
+   - Biological question: is "None" meaning "no mRNA" or "undetectable mRNA"?
+
+2. **SNR threshold strategy** — per-channel or global?
+   - Global: one threshold for all 3 channels
+   - Per-channel: different thresholds for Ch1/Ch2/Ch3 (autofluorescence levels differ)
+   - Method: inspect `snr_h4` distribution in `anchor_candidates.csv` → bimodal?
+   - Suggested approach: plot SNR histogram per channel → identify valley between noise and signal peaks
+
+### After threshold validation
+- [ ] Compare `anchor_summary.csv` barcode vs `module6/barcodes.csv` — agreement rate?
+- [ ] Nuclei where anchor disagrees with Module 6: inspect QC crops
 - [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
 - [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
 - [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
