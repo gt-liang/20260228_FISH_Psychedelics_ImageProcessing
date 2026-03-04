@@ -30,6 +30,7 @@ Outputs  (python_results/puncta_anchor/groups/)
   fig_none_multi_signals.png    — Hyb3 vs Hyb2 normalized signal scatter + failed histogram
 """
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -386,6 +387,52 @@ def fig_none_multi_signals(
     print(f"  Saved: {out_path.name}")
 
 
+# ── Crop organization ──────────────────────────────────────────────────────
+def organize_crops_into_groups(df: pd.DataFrame, crops_dir: Path, out_dir: Path):
+    """
+    Copy existing nucleus QC PNGs into two top-level group folders:
+
+      single_ok_crops/          — 946 nuclei (1 candidate, confirmed)
+      none_multi_crops/
+        multi/                  — 259 nuclei (≥2 candidates)
+        single_unconfirmed/     — 23  nuclei (1 candidate, not confirmed)
+        zero/                   — 2   nuclei (no LoG detection)
+
+    Uses shutil.copy2 (preserves timestamps).  The originals in nucleus_crops/
+    are untouched — these are independent copies for browsing convenience.
+    """
+    dest_map = {
+        "single_ok":          out_dir / "single_ok_crops",
+        "multi":              out_dir / "none_multi_crops" / "multi",
+        "single_unconfirmed": out_dir / "none_multi_crops" / "single_unconfirmed",
+        "zero":               out_dir / "none_multi_crops" / "zero",
+    }
+    for d in dest_map.values():
+        d.mkdir(parents=True, exist_ok=True)
+
+    copied  = {g: 0 for g in dest_map}
+    missing = []
+
+    for _, row in df.iterrows():
+        nid   = int(row["nucleus_id"])
+        group = row["group"]
+        src   = crops_dir / f"nucleus_{nid:04d}.png"
+        dst_d = dest_map.get(group)
+        if dst_d is None:
+            continue
+        if not src.exists():
+            missing.append(nid)
+            continue
+        shutil.copy2(str(src), str(dst_d / src.name))
+        copied[group] += 1
+
+    print(f"  Organized nucleus crops into group folders:")
+    for g, cnt in copied.items():
+        print(f"    {g:<22}  {cnt:4d} files → {dest_map[g].relative_to(out_dir.parent.parent)}")
+    if missing:
+        print(f"  WARNING: {len(missing)} nucleus PNGs not found in {crops_dir}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     print("=" * 65)
@@ -475,19 +522,29 @@ def main():
     fig_single_ok_barcodes(df_summary, OUT_DIR)
     fig_none_multi_signals(df_summary, df_cands, OUT_DIR)
 
+    # ── Organize nucleus crops into group folders ──────────────────────────
+    crops_dir = ANCHOR_DIR / "nucleus_crops"
+    if crops_dir.exists() and any(crops_dir.glob("nucleus_*.png")):
+        print("\nOrganizing nucleus QC crops into group folders...")
+        organize_crops_into_groups(df_summary, crops_dir, OUT_DIR)
+    else:
+        print(f"\nWARNING: {crops_dir} not found or empty — run run_puncta_anchor.py first")
+
     print("\n" + "=" * 65)
     print("COMPLETE")
-    print(f"  Outputs:  {OUT_DIR}")
-    print(f"  QC crops: {ANCHOR_DIR / 'nucleus_crops'}")
+    print(f"  Outputs: {OUT_DIR}")
     print()
-    print("Next steps:")
-    print("  1. fig_group_distribution.png  — verify group sizes match expectations")
-    print("  2. fig_single_ok_barcodes.png  — check expected barcodes are present")
-    print("  3. fig_none_multi_signals.png  — investigate failed candidates")
-    print("  4. Manual auditing: open nucleus_crops/nucleus_XXXX.png for IDs in")
-    print("     single_ok_nucleus_ids.csv (sample per barcode to verify correctness)")
-    print("  5. For none/multi inspection: open their nucleus_XXXX.png crops")
-    print("     (red circles = unconfirmed candidates, green = confirmed)")
+    print("  Nucleus crops organized into:")
+    print(f"    groups/single_ok_crops/               ← browse confirmed single-punctum cells")
+    print(f"    groups/none_multi_crops/multi/         ← ≥2 candidates (detection artifact?)")
+    print(f"    groups/none_multi_crops/single_unconfirmed/  ← failed H3 or H2 threshold")
+    print(f"    groups/none_multi_crops/zero/          ← no LoG detection at all")
+    print()
+    print("  Manual auditing workflow:")
+    print("    1. Open single_ok_crops/ — sample a few per barcode, verify color calls")
+    print("    2. Open none_multi_crops/multi/ — do these cells look like genuine multi-puncta?")
+    print("    3. Open none_multi_crops/single_unconfirmed/ — why did they fail H3 or H2?")
+    print("    4. Check fig_none_multi_signals.png — how close to threshold were failed cells?")
     print("=" * 65)
 
 
