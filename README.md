@@ -1,8 +1,8 @@
 # 20260228 FISH Psychedelics Image Processing
 
 **Lab**: Boeynaems Lab, Baylor College of Medicine
-**Status**: ✅ Modules 1–6 operational | ✅ Puncta Anchor v2 (normalized threshold) | ⏳ Detection redesign planned
-**Last Updated**: 2026-03-03
+**Status**: ✅ Modules 1–6 operational | ✅ Puncta Anchor v2 (normalized threshold) | ✅ Group QC analysis | ⏳ Detection redesign planned
+**Last Updated**: 2026-03-04
 
 ---
 
@@ -223,6 +223,7 @@ Uses **Hyb4 as anchor round** to detect punctum positions, then cross-validates 
 |--------|---------|
 | `run_puncta_anchor.py` | Main pipeline: detect → validate → barcode |
 | `run_snr_histogram.py` | Standalone 3×3 SNR histogram analysis |
+| `run_puncta_qc_groups.py` | Group QC: split single_ok vs none_multi, signal analysis |
 | `config/puncta_anchor.yaml` | All tunable parameters |
 
 **Current results** (log_threshold=0.20, normalized threshold v2):
@@ -230,7 +231,19 @@ Uses **Hyb4 as anchor round** to detect punctum positions, then cross-validates 
 - 969 nuclei with exactly 1 candidate (79%) — ideal
 - Confirmation criterion: `peak_in_window / nucleus_p25_background ≥ 2.0` (Ch1/Ch3), `≥ 1.5` (Ch2)
 
-**Known issue**: 259 nuclei (21%) have >1 candidate — likely small-nucleus detection artifacts
+**Group QC analysis** (`run_puncta_qc_groups.py`, 2026-03-04):
+
+| Group | Count | % | Notes |
+|-------|------:|--:|-------|
+| single_ok | 946 | 76.9% | 1 candidate, confirmed → 25 unique barcodes |
+| single_unconfirmed | 23 | 1.9% | 1 candidate, failed H3 or H2 threshold |
+| zero | 2 | 0.2% | LoG found no blobs |
+| multi | 259 | 21.1% | ≥2 blobs detected |
+
+Key finding: 77% (735/949) of candidates in none/multi nuclei confirm in BOTH rounds — the LoG
+detects the same real spot at multiple scales. Only 60 candidates (6.3%) fully failed both rounds.
+
+**Known issue**: 259 nuclei (21%) have >1 candidate — LoG scale-sensitivity artifact
 → **Planned fix**: replace LoG multi-blob with single-peak detection (see Next Steps)
 
 ---

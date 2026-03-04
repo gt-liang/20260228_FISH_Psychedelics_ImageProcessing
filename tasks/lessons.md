@@ -365,6 +365,44 @@ xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negativ
 
 ---
 
+## Puncta Group QC Lessons (2026-03-04)
+
+### Multi-candidate nuclei: most "extra" candidates are genuine signals
+- **Problem**: 259/1230 nuclei (21%) had ≥2 LoG candidates. Expected 1 per cell.
+- **Key finding**: in the none_multi group (284 nuclei, 949 candidates), **735/949 (77%)
+  of candidates confirmed in BOTH Hyb3 and Hyb2**.
+- **Implication**: the LoG is detecting the same real smFISH spot at multiple scales
+  (sigma=1–4px range → sub-spots of the same punctum), NOT random noise. The multi-candidate
+  issue is a detection artifact (scale sensitivity of LoG), not a signal quality problem.
+- **Consequence**: the "pick best by intensity" strategy works correctly for most multi-
+  candidate nuclei. The highest-confirmed candidate IS the real one.
+- **For algorithm redesign**: single-peak detection (argmax) will collapse LoG multi-detections
+  of the same real spot into 1 candidate, naturally solving the multi-candidate problem.
+
+### Only 60 candidates (6.3%) fully failed both rounds in none_multi group
+- 949 candidates in 284 none_multi nuclei. Breakdown by confirmation status:
+  - both_confirmed: 735 (77%) ← these multi-nuclei candidates are mostly real!
+  - h3_only: 89 (9%)
+  - h2_only: 65 (7%)
+  - neither: 60 (6%) ← fully failed
+- Candidates failing only ONE round (h3_only or h2_only) may be borderline real signals.
+  Consider: is SEARCH_RADIUS too small? Is the registration error larger in one round?
+
+### 25 unique barcodes in single_ok vs 22 in Module 6 — worth investigating
+- single_ok group (n=946, n_candidates=1, confirmed): 25 unique barcodes
+- Module 6 argmax decoder (n=1216 decoded): 22 unique barcodes
+- The extra 3 barcodes in anchor could be: (a) real barcodes missed by M6 argmax,
+  or (b) false positives where the normalized threshold is too permissive for dim cells.
+- Action: compare barcodes between single_ok and M6 decoded set.
+
+### Working with existing CSV outputs — no need to re-run pipeline
+- `anchor_summary.csv` + `anchor_candidates.csv` contain all needed info for group analysis.
+- `run_puncta_qc_groups.py` reads these CSVs and generates group analysis in seconds.
+- Splitting into groups should always be done POST-hoc from CSVs, not during the pipeline run.
+- Output: `python_results/puncta_anchor/groups/` with group_labels.csv, barcode charts, signal plots.
+
+---
+
 ## Repo / GitHub
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)

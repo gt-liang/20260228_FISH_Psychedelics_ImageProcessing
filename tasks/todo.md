@@ -1,6 +1,6 @@
 # FISH Psychedelics Image Processing - Task List
-**Last Updated**: 2026-03-03
-**Status**: Full pipeline + Puncta Anchor v2 (normalized threshold, 97.4% decoded) ✅ | Detection redesign PENDING ⏳
+**Last Updated**: 2026-03-04
+**Status**: Full pipeline ✅ | Puncta Anchor v2 (normalized threshold, 97.4%) ✅ | Group QC analysis ✅ | Detection redesign PENDING ⏳
 
 ---
 
@@ -209,6 +209,29 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 12. **Biological constraint confirmed**: each HEK cell should have exactly 1 punctum
     - Multi-candidate nuclei are suspect regardless of cause
     - Two types: small-nucleus artifacts + merged cells (n_cand=2 with normal area)
+
+---
+
+## ✅ Completed Today (2026-03-04)
+
+### Group QC Analysis (`run_puncta_qc_groups.py`)
+1. **Implemented group classification** — split 1230 nuclei from anchor results into:
+   - single_ok: 946 (76.9%) — 1 candidate, confirmed in H3+H2 → barcode analysis ready
+   - single_unconfirmed: 23 (1.9%) — 1 candidate but failed H3 or H2 threshold
+   - zero: 2 (0.2%) — LoG found no blobs
+   - multi: 259 (21.1%) — ≥2 blobs detected
+2. **Outputs (python_results/puncta_anchor/groups/)**:
+   - `group_labels.csv` — all 1230 nuclei with group label
+   - `single_ok_barcodes.csv` — 25 unique barcodes, 946 cells
+   - `single_ok_nucleus_ids.csv` — nucleus IDs per barcode (for manual auditing of QC crops)
+   - `none_multi_candidates.csv` — 949 candidates from 284 none/multi nuclei (including subthreshold)
+   - `fig_group_distribution.png` — group counts bar chart
+   - `fig_single_ok_barcodes.png` — barcode distribution for single_ok
+   - `fig_none_multi_signals.png` — H3 vs H2 signal scatter + failed-filter histogram
+3. **Key scientific finding**: 77% (735/949) of candidates in none/multi nuclei confirm in
+   BOTH rounds — LoG is detecting the same real spot at multiple scales, not noise.
+   Only 60 candidates (6.3%) fully failed both rounds.
+4. **25 unique barcodes** in single_ok vs 22 in Module 6 — 3 extra barcodes to investigate.
 
 ---
 
