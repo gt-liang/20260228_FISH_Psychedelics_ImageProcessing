@@ -10,17 +10,29 @@ color changes between rounds.  A genuine punctum detected at position (y, x)
 in Hyb4 *must* appear at the same (y, x) in Hyb3 and Hyb2 (after registration
 correction).  Signals that appear only in one round are noise.
 
-Algorithm
----------
-1. Per nucleus — detect ALL puncta positions in Hyb4:
-       LoG blob detection on max-projection(Ch1, Ch2, Ch3) within nucleus mask.
+Algorithm (v3 — per-channel argmax detection)
+----------------------------------------------
+1. Per nucleus — find the single best punctum position in Hyb4:
+       For EACH channel separately, find the brightest pixel position within
+       the nucleus mask and compute its normalized signal (peak / nucleus_p25_bg).
+       Pick the channel+position with the highest normalized signal.
+       Guarantees exactly 0 or 1 candidate per nucleus (by design).
+
+       Why not MIP detection (v1/v2)?
+       MIP = max(Ch1, Ch2, Ch3) per pixel.  The detected position is where ANY
+       channel peaks — e.g., a small Yellow pixel at (y1, x1) can dominate the MIP
+       even if a larger Purple spot exists at (y2, x2).  We then measure Purple *at
+       the Yellow position*, find it weak there, and incorrectly call Yellow.
+       Per-channel detection finds each channel's own argmax, then picks the winner.
+
 2. Per candidate position — cross-reference in Hyb3 and Hyb2:
        HybN position = (y_h4 − dy,  x_h4 − dx)        [registration formula]
        Measure max intensity in a search_radius window for each channel.
-       call_color = argmax(Ch1, Ch2, Ch3) if max ≥ min_signal else "None".
-       confirmed_h3 / confirmed_h2 = signal present in that round.
-3. Report ALL candidates per nucleus (not just the best), with QC figures for
-   manual inspection.
+       call_color_normalized: peak / nucleus_p25_bg ≥ per-channel threshold
+                              AND peak ≥ min_absolute_signal (absolute floor).
+       confirmed_h3 / confirmed_h2 = both conditions met in that round.
+
+3. Report the single candidate with QC figure for every nucleus.
 
 Outputs  (python_results/puncta_anchor/)
 -----------------------------------------
@@ -51,7 +63,6 @@ import yaml
 from aicsimageio import AICSImage
 from loguru import logger
 from scipy.ndimage import shift as ndimage_shift
-from skimage.feature import blob_log
 from skimage.segmentation import find_boundaries
 
 PROJECT_ROOT = Path(__file__).parent
@@ -62,13 +73,13 @@ _CFG_PATH = PROJECT_ROOT / "config/puncta_anchor.yaml"
 with open(_CFG_PATH) as _f:
     _CFG = yaml.safe_load(_f)
 
-LOG_MIN_SIGMA  = float(_CFG["detection"]["min_sigma"])
-LOG_MAX_SIGMA  = float(_CFG["detection"]["max_sigma"])
-LOG_THRESHOLD  = float(_CFG["detection"]["log_threshold"])
 SEARCH_RADIUS  = int(_CFG["validation"]["search_radius"])
-MIN_SNR_RATIO  = float(_CFG["validation"].get("min_snr_ratio", 0.0))
 FIG_DPI        = int(_CFG["output"].get("figure_dpi", 100))
 SAVE_FIGURES   = bool(_CFG["output"].get("save_figures", True))
+
+# Fixed blob display radius for the per-channel single-peak approach
+# (replaces the LoG sigma that varied per blob; 2.0 px → circle radius = √2×2 ≈ 2.8 px)
+SIGMA_FIXED = 2.0
 
 # Per-channel normalized signal threshold: max_in_window / nucleus_p25_background
 _NORM_CFG = _CFG["validation"]["min_signal_normalized"]
@@ -77,6 +88,11 @@ MIN_SIGNAL_NORM = {
     "Ch2_AF590": float(_NORM_CFG.get("Ch2_AF590", 1.5)),
     "Ch3_AF488": float(_NORM_CFG.get("Ch3_AF488", 2.0)),
 }
+
+# Absolute signal floor: max_in_window must exceed this ADU value regardless of ratio.
+# Prevents diffuse mCherry nuclear background (typically 200–400 ADU) from being
+# amplified to a false-positive confirmation when the nucleus p25 background is very low.
+MIN_ABS_SIGNAL = int(_CFG["validation"].get("min_absolute_signal", 300))
 
 # ── Constants (mirrors other pipeline scripts) ────────────────────────────────
 CHANNELS = ["Ch1_AF647", "Ch2_AF590", "Ch3_AF488"]
@@ -258,28 +274,39 @@ def _compute_snr(image: np.ndarray, mask: np.ndarray,
     return peak_inside / outside_mean
 
 
-# ── Step 1: Hyb4 detection ────────────────────────────────────────────────────
-def detect_positions_hyb4(images_hyb4: dict,
-                           nucleus_mask: np.ndarray) -> list:
+# ── Step 1: Hyb4 detection (per-channel argmax) ────────────────────────────
+def detect_best_channel_peak_hyb4(images_hyb4: dict,
+                                   nucleus_mask: np.ndarray,
+                                   nucleus_bg_h4: dict) -> list:
     """
-    Detect puncta in Hyb4 via LoG on the channel max-projection.
+    Find the single best punctum position in Hyb4 via per-channel argmax.
 
     Scientific logic
     ----------------
-    mRNA position is colour-agnostic (same spot emits in whichever channel
-    the current probe targets).  Taking max(Ch1, Ch2, Ch3) ensures we detect
-    the spot regardless of which colour it is in Hyb4.
+    Previous MIP approach bias:
+      max_proj = max(Ch1, Ch2, Ch3) → detects where ANY channel peaks.
+      A bright Yellow pixel at (y1, x1) dominates the MIP even if a larger
+      Purple spot exists at (y2, x2).  We measure Purple at (y1, x1), find it
+      weak there, and incorrectly call Yellow.
+
+    This function:
+      For EACH channel: find the pixel with highest signal within the nucleus,
+      normalize by that channel's p25 background.
+      The channel with the highest normalized signal wins, and that channel's
+      pixel position is returned as the single candidate.
+
+    Result: color identity and spatial position are always consistent —
+    the position IS where the winning channel is actually strongest.
 
     Parameters
     ----------
-    images_hyb4 : {ch: 2D array}  — full-image Hyb4 channels
-    nucleus_mask : bool 2D array  — True pixels belong to this nucleus
+    images_hyb4   : {ch: 2D array}  — full-image Hyb4 channels (ADU)
+    nucleus_mask  : bool 2D array   — True = pixels belonging to this nucleus
+    nucleus_bg_h4 : {ch: float}     — per-channel p25 background in Hyb4
 
     Returns
     -------
-    List of (y_global, x_global, sigma, snr) tuples.
-      sigma : LoG scale parameter; blob radius = sqrt(2) × sigma (px)
-      snr   : inside/outside fluorescence ratio (MIN_SNR_RATIO filter already applied)
+    List of 0 or 1 tuples: [(y_global, x_global, sigma_fixed, snr_peak)]
     """
     ys, xs = np.where(nucleus_mask)
     if len(ys) == 0:
@@ -287,52 +314,45 @@ def detect_positions_hyb4(images_hyb4: dict,
 
     r0, r1 = int(ys.min()), int(ys.max()) + 1
     c0, c1 = int(xs.min()), int(xs.max()) + 1
+    mask_crop = nucleus_mask[r0:r1, c0:c1]
 
-    # Max-projection across channels within the nucleus bounding box
+    # Per-channel: find argmax position and normalized signal within nucleus
+    best_norm = -1.0
+    best_pos  = None   # (y_global, x_global)
+
+    for ch in CHANNELS:
+        ch_crop = images_hyb4[ch][r0:r1, c0:c1].astype(np.float64)
+        ch_in   = np.where(mask_crop, ch_crop, -1.0)
+
+        max_val = ch_in.max()
+        if max_val < 1.0:
+            continue   # dark channel in this nucleus
+
+        peak_flat      = int(np.argmax(ch_in))
+        y_crop, x_crop = np.unravel_index(peak_flat, ch_in.shape)
+
+        bg   = max(nucleus_bg_h4.get(ch, 1.0), 1.0)
+        norm = max_val / bg
+
+        if norm > best_norm:
+            best_norm = norm
+            best_pos  = (y_crop + r0, x_crop + c0)
+
+    if best_pos is None or best_norm < 1.0:
+        return []   # no channel has signal above its own background
+
+    # Compute max-projection SNR at the winning position (for recordkeeping)
     max_proj = np.zeros((r1 - r0, c1 - c0), dtype=np.float64)
     for ch in CHANNELS:
         max_proj = np.maximum(max_proj,
                               images_hyb4[ch][r0:r1, c0:c1].astype(np.float64))
+    max_proj_norm = np.where(mask_crop, max_proj / max(max_proj.max(), 1.0), 0.0)
+    y_local = best_pos[0] - r0
+    x_local = best_pos[1] - c0
+    r_blob  = np.sqrt(2.0) * SIGMA_FIXED
+    snr     = _compute_snr(max_proj_norm, mask_crop, y_local, x_local, r_blob)
 
-    # Apply nucleus mask (zero outside) so LoG doesn't detect background blobs
-    mask_crop = nucleus_mask[r0:r1, c0:c1]
-    max_proj_masked = np.where(mask_crop, max_proj, 0.0)
-
-    max_val = max_proj_masked.max()
-    if max_val < 1.0:
-        return []   # empty / very dark nucleus
-
-    norm = max_proj_masked / max_val
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        blobs = blob_log(
-            norm,
-            min_sigma=LOG_MIN_SIGMA,
-            max_sigma=LOG_MAX_SIGMA,
-            num_sigma=10,
-            threshold=LOG_THRESHOLD,
-        )
-
-    # Convert crop-local coordinates → global image coordinates,
-    # filter to mask, and apply SNR ratio threshold.
-    positions = []
-    for blob in blobs:
-        y_c, x_c, sigma = int(round(blob[0])), int(round(blob[1])), float(blob[2])
-        if not (0 <= y_c < mask_crop.shape[0] and
-                0 <= x_c < mask_crop.shape[1] and
-                mask_crop[y_c, x_c]):
-            continue
-
-        # SNR filter: inside-to-outside fluorescence ratio
-        r_blob = np.sqrt(2.0) * sigma
-        snr = _compute_snr(max_proj_masked, mask_crop, y_c, x_c, r_blob)
-        if snr < MIN_SNR_RATIO:
-            continue   # not a genuine punctum — discard
-
-        positions.append((y_c + r0, x_c + c0, sigma, snr))
-
-    return positions
+    return [(*best_pos, SIGMA_FIXED, snr)]
 
 
 # ── Step 2: Cross-round signal measurement ────────────────────────────────────
@@ -521,7 +541,11 @@ def call_color_normalized(signals_rnd: dict, bg_rnd: dict) -> tuple:
     max_abs  = signals_rnd[max_ch]
     threshold = MIN_SIGNAL_NORM[max_ch]
 
-    if max_norm < threshold:
+    # Dual confirmation gate:
+    #   1. Normalized ratio ≥ per-channel threshold (cell-independent criterion)
+    #   2. Absolute signal ≥ MIN_ABS_SIGNAL (prevents diffuse mCherry background
+    #      from being amplified to a false positive when nucleus p25 is very low)
+    if max_norm < threshold or max_abs < MIN_ABS_SIGNAL:
         return "None", max_abs, max_norm
     return CH_COLOR_NAME[max_ch], max_abs, max_norm
 
@@ -709,13 +733,17 @@ def make_nucleus_figure(
                 ax.set_ylabel(rnd, fontsize=8, labelpad=3)
             ax.set_xticks([]); ax.set_yticks([])
 
-        # ── Merged RGB panel ───────────────────────────────────────────────
+        # ── Merged RGB panel (Purple + Blue + Yellow using actual display colors) ──
+        # Each channel contributes its true display color (not raw R/G/B mapping).
+        # This matches the per-channel panels so colors are visually consistent.
         ax_merge = fig.add_subplot(gs[r_idx, 3])
-        merged = np.clip(np.stack([
-            norm_crops["Ch1_AF647"],   # R — Purple
-            norm_crops["Ch3_AF488"],   # G — Yellow
-            norm_crops["Ch2_AF590"],   # B — Blue
-        ], axis=-1), 0.0, 1.0)
+        merged = np.zeros((*norm_crops["Ch1_AF647"].shape, 3), dtype=np.float64)
+        for _ch in CHANNELS:
+            _nc    = norm_crops[_ch]
+            _color = CH_COLORS_RGB[_ch]
+            merged += np.stack([_nc * _color[0], _nc * _color[1], _nc * _color[2]],
+                               axis=-1)
+        merged = np.clip(merged, 0.0, 1.0)
         ax_merge.imshow(merged, interpolation="nearest")
 
         bd_w = np.zeros((*boundary.shape, 4), dtype=np.float32)
@@ -793,7 +821,7 @@ def make_nucleus_figure(
             ax_table.text(
                 0.5, 0.01,
                 f"… {n_hidden} more candidates not shown  "
-                f"(lower log_threshold in config/puncta_anchor.yaml to reduce detections)",
+                f"(lower norm thresholds in config/puncta_anchor.yaml to reduce detections)",
                 ha="center", va="bottom", fontsize=6, color="#888888",
                 transform=ax_table.transAxes
             )
@@ -801,8 +829,9 @@ def make_nucleus_figure(
     fig.suptitle(
         f"Nucleus {nid}  |  centroid=({cx}, {cy})  |  "
         f"{n_cands} Hyb4 candidate(s)  "
-        f"[LoG thr={LOG_THRESHOLD}  norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
-        f"Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  search_r={SEARCH_RADIUS}px]",
+        f"[per-channel argmax  norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
+        f"Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  abs≥{MIN_ABS_SIGNAL}ADU  "
+        f"search_r={SEARCH_RADIUS}px]",
         fontsize=9, fontweight="bold", y=0.99,
     )
     return fig
@@ -812,9 +841,9 @@ def make_nucleus_figure(
 def main():
     logger.info("=" * 65)
     logger.info("Puncta Anchor Validation Pipeline: START")
-    logger.info(f"  Detection : LoG  min_σ={LOG_MIN_SIGMA}  max_σ={LOG_MAX_SIGMA}"
-                f"  threshold={LOG_THRESHOLD}")
-    logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px")
+    logger.info(f"  Detection : per-channel argmax  sigma_fixed={SIGMA_FIXED}")
+    logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px  "
+                f"abs_floor={MIN_ABS_SIGNAL}ADU")
     logger.info(f"  Norm thresholds: Ch1≥{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
                 f"Ch2≥{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  "
                 f"Ch3≥{MIN_SIGNAL_NORM['Ch3_AF488']:.1f}  "
@@ -844,12 +873,14 @@ def main():
         nid = int(nid)
         nucleus_mask = (labels == nid)
 
-        # ── Step 1: Detect positions in Hyb4 ─────────────────────────────
-        positions = detect_positions_hyb4(images["Hyb4"], nucleus_mask)
-
-        # ── Per-nucleus background (computed once, shared by all candidates) ──
+        # ── Per-nucleus background (computed first; detection depends on it) ──
         # nucleus_bg[rnd][ch] = 25th percentile of nucleus pixels = background floor
         nucleus_bg = compute_nucleus_background(images, labels_shifted_all, nid)
+
+        # ── Step 1: Detect best punctum position in Hyb4 (per-channel argmax) ──
+        positions = detect_best_channel_peak_hyb4(
+            images["Hyb4"], nucleus_mask, nucleus_bg["Hyb4"]
+        )
 
         # ── Step 2 & 3: Measure signals in all rounds per candidate ───────
         candidates: list[dict] = []
@@ -988,8 +1019,8 @@ def main():
     logger.info("=" * 65)
     logger.info("Next steps:")
     logger.info("  1. Review nucleus_crops/ — white=Hyb4 detected, green=confirmed, red=not")
-    logger.info("  2. If too many/few candidates: adjust log_threshold in config/puncta_anchor.yaml")
-    logger.info("  3. If cross-round misses real signals: increase search_radius or lower min_signal")
+    logger.info("  2. If cross-round thresholding is off: adjust norm thresholds or min_absolute_signal in config")
+    logger.info("  3. If cross-round misses real signals: increase search_radius or lower min_absolute_signal")
     logger.info("=" * 65)
 
 
