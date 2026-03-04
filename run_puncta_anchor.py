@@ -66,10 +66,17 @@ LOG_MIN_SIGMA  = float(_CFG["detection"]["min_sigma"])
 LOG_MAX_SIGMA  = float(_CFG["detection"]["max_sigma"])
 LOG_THRESHOLD  = float(_CFG["detection"]["log_threshold"])
 SEARCH_RADIUS  = int(_CFG["validation"]["search_radius"])
-MIN_SIGNAL     = float(_CFG["validation"]["min_signal"])
-MIN_SNR_RATIO  = float(_CFG["validation"].get("min_snr_ratio", 10.0))
+MIN_SNR_RATIO  = float(_CFG["validation"].get("min_snr_ratio", 0.0))
 FIG_DPI        = int(_CFG["output"].get("figure_dpi", 100))
 SAVE_FIGURES   = bool(_CFG["output"].get("save_figures", True))
+
+# Per-channel normalized signal threshold: max_in_window / nucleus_p25_background
+_NORM_CFG = _CFG["validation"]["min_signal_normalized"]
+MIN_SIGNAL_NORM = {
+    "Ch1_AF647": float(_NORM_CFG.get("Ch1_AF647", 2.0)),
+    "Ch2_AF590": float(_NORM_CFG.get("Ch2_AF590", 1.5)),
+    "Ch3_AF488": float(_NORM_CFG.get("Ch3_AF488", 2.0)),
+}
 
 # ── Constants (mirrors other pipeline scripts) ────────────────────────────────
 CHANNELS = ["Ch1_AF647", "Ch2_AF590", "Ch3_AF488"]
@@ -360,16 +367,163 @@ def measure_round_signals(images: dict, regs: dict,
     return signals
 
 
-def call_color(signals_rnd: dict) -> tuple:
+# ── Step 2b: Per-channel per-round SNR ───────────────────────────────────────
+def measure_per_channel_snr(images: dict,
+                             labels_shifted_all: dict,
+                             regs: dict,
+                             nid: int,
+                             y_h4: int, x_h4: int,
+                             sigma: float) -> dict:
     """
-    Given {ch: signal} for one round, return (color_name, max_signal).
-    If no channel exceeds MIN_SIGNAL → ("None", max_signal).
+    Compute per-channel, per-round SNR at the Hyb4-anchored position.
+
+    Scientific logic
+    ----------------
+    The same punctum position (anchored from Hyb4) is sampled independently
+    in each channel of each round using the peak-to-background ratio:
+        SNR = peak_inside / mean_outside
+
+    This gives a 3-round × 3-channel matrix (9 values) that reveals:
+      - Which channels have genuine signal above local background
+      - Whether Ch2_AF590 (mCherry-affected) has a systematically different
+        SNR distribution from Ch1/Ch3 (important for per-channel thresholding)
+      - Whether SNR differs between rounds (signal vs carry-over rounds)
+
+    Parameters
+    ----------
+    images             : {round: {ch: 2D array}}
+    labels_shifted_all : {round: 2D label array in that round's frame}
+    regs               : {round: (dy, dx)}
+    nid                : nucleus ID
+    y_h4, x_h4        : candidate position in global Hyb4 frame
+    sigma              : LoG sigma; blob radius = sqrt(2) * sigma
+
+    Returns
+    -------
+    {round: {ch: snr_float}}  — 9 values total
     """
-    max_ch  = max(signals_rnd, key=signals_rnd.get)
-    max_sig = signals_rnd[max_ch]
-    if max_sig < MIN_SIGNAL:
-        return "None", max_sig
-    return CH_COLOR_NAME[max_ch], max_sig
+    r_blob = np.sqrt(2.0) * sigma
+    snr_all = {}
+
+    for rnd in ROUNDS:
+        dy, dx = regs[rnd]
+        y_rnd = int(round(y_h4 - dy))
+        x_rnd = int(round(x_h4 - dx))
+
+        # Nucleus mask in this round's image frame
+        lbl_rnd   = labels_shifted_all[rnd]
+        nuc_mask  = (lbl_rnd == nid)
+        ys, xs    = np.where(nuc_mask)
+
+        if len(ys) == 0:
+            snr_all[rnd] = {ch: 0.0 for ch in CHANNELS}
+            continue
+
+        r0, r1 = int(ys.min()), int(ys.max()) + 1
+        c0, c1 = int(xs.min()), int(xs.max()) + 1
+        mask_crop = nuc_mask[r0:r1, c0:c1]
+
+        # Position in bounding-box local coordinates
+        y_local = y_rnd - r0
+        x_local = x_rnd - c0
+
+        snr_all[rnd] = {}
+        for ch in CHANNELS:
+            ch_crop   = images[rnd][ch][r0:r1, c0:c1].astype(np.float64)
+            ch_masked = np.where(mask_crop, ch_crop, 0.0)
+            snr_all[rnd][ch] = _compute_snr(
+                ch_masked, mask_crop, y_local, x_local, r_blob
+            )
+
+    return snr_all
+
+
+# ── Step 2c: Per-nucleus per-channel background ───────────────────────────────
+def compute_nucleus_background(images: dict,
+                                labels_shifted_all: dict,
+                                nid: int) -> dict:
+    """
+    Compute per-channel per-round nuclear background for one nucleus.
+
+    Scientific logic
+    ----------------
+    Background = 25th percentile of all pixels within the nucleus mask,
+    measured independently for each channel and each round.
+
+    Rationale for p25 (not median or mean):
+      - The nucleus contains a few bright puncta; the median and mean are
+        pulled upward, overestimating background.
+      - p25 sits below most puncta signal and above detector read noise,
+        giving a stable, robust floor estimate.
+      - Per-nucleus: removes cell-to-cell variation in baseline fluorescence
+        (autofluorescence, expression level, imaging depth variation).
+      - Per-channel: each dye has a different offset (mCherry Ch2_AF590
+        creates diffuse nuclear background not present in Ch1/Ch3).
+      - Per-round: the same nucleus may differ across Hyb4/Hyb3/Hyb2 due
+        to photobleaching or reagent washout between rounds.
+
+    Parameters
+    ----------
+    images             : {round: {ch: 2D array}}
+    labels_shifted_all : {round: 2D label array in that round's image frame}
+    nid                : nucleus ID (integer label value)
+
+    Returns
+    -------
+    {round: {ch: float}}  — 9 background estimates (p25 of nucleus pixels)
+    """
+    bg = {}
+    for rnd in ROUNDS:
+        nuc_mask = (labels_shifted_all[rnd] == nid)
+        bg[rnd] = {}
+        for ch in CHANNELS:
+            pixels = images[rnd][ch][nuc_mask]
+            if len(pixels) >= 4:
+                bg[rnd][ch] = float(np.percentile(pixels, 25))
+            else:
+                bg[rnd][ch] = 1.0   # fallback for tiny / edge nuclei
+    return bg
+
+
+def call_color_normalized(signals_rnd: dict, bg_rnd: dict) -> tuple:
+    """
+    Color call using per-nucleus per-channel normalized signal.
+
+    Scientific logic
+    ----------------
+    normalized_signal[ch] = max_in_search_window[ch] / nucleus_p25_background[ch]
+
+    This is a cell-independent criterion: a ratio of 2.0 means "this spot is
+    2× brighter than this cell's own baseline fluorescence in that channel",
+    regardless of the absolute ADU level.  Per-channel thresholds account for
+    the fact that Ch2_AF590 (mCherry) creates a diffuse nuclear background that
+    systematically lowers SNR relative to Ch1/Ch3.
+
+    Parameters
+    ----------
+    signals_rnd : {ch: float} — raw max pixel value in search window, per channel
+    bg_rnd      : {ch: float} — nucleus 25th-percentile background, per channel
+
+    Returns
+    -------
+    (color_name, max_abs_signal, max_norm_signal)
+      color_name     : "Purple" / "Blue" / "Yellow" / "None"
+      max_abs_signal : raw ADU value of the winning channel
+      max_norm_signal: normalized ratio of the winning channel
+    """
+    norm_signals = {}
+    for ch in CHANNELS:
+        bg = max(bg_rnd.get(ch, 1.0), 1.0)   # floor at 1.0 to avoid division by zero
+        norm_signals[ch] = signals_rnd[ch] / bg
+
+    max_ch   = max(norm_signals, key=norm_signals.get)
+    max_norm = norm_signals[max_ch]
+    max_abs  = signals_rnd[max_ch]
+    threshold = MIN_SIGNAL_NORM[max_ch]
+
+    if max_norm < threshold:
+        return "None", max_abs, max_norm
+    return CH_COLOR_NAME[max_ch], max_abs, max_norm
 
 
 # ── Step 4: QC figure ─────────────────────────────────────────────────────────
@@ -590,22 +744,24 @@ def make_nucleus_figure(
         n_hidden    = n_cands - len(cands_shown)
 
         col_lbls = [
-            "#", "Pos (y,x)", "H4 color", "H4 max", "SNR",
-            "H3 color", "H3 max", "H2 color", "H2 max",
+            "#", "Pos (y,x)", "H4 color", "H4 norm", "H4 max",
+            "H3 color", "H3 norm", "H2 color", "H2 norm",
             "H3 ✓", "H2 ✓", "Barcode",
         ]
         table_data  = []
         cell_colors = []
 
         for idx, cand in enumerate(cands_shown):
-            snr_val = cand.get("snr_h4", float("nan"))
-            snr_str = f"{snr_val:.1f}" if np.isfinite(snr_val) else "∞"
             row = [
                 str(idx + 1),
                 f"{cand['y_h4']}, {cand['x_h4']}",
-                cand["color_h4"], f"{cand['max_h4']:.0f}", snr_str,
-                cand["color_h3"], f"{cand['max_h3']:.0f}",
-                cand["color_h2"], f"{cand['max_h2']:.0f}",
+                cand["color_h4"],
+                f"{cand.get('norm_max_h4', 0.0):.2f}",
+                f"{cand['max_h4']:.0f}",
+                cand["color_h3"],
+                f"{cand.get('norm_max_h3', 0.0):.2f}",
+                cand["color_h2"],
+                f"{cand.get('norm_max_h2', 0.0):.2f}",
                 "✓" if cand["confirmed_h3"] else "✗",
                 "✓" if cand["confirmed_h2"] else "✗",
                 cand["barcode"],
@@ -645,8 +801,8 @@ def make_nucleus_figure(
     fig.suptitle(
         f"Nucleus {nid}  |  centroid=({cx}, {cy})  |  "
         f"{n_cands} Hyb4 candidate(s)  "
-        f"[LoG thr={LOG_THRESHOLD}  SNR≥{MIN_SNR_RATIO:.0f}  "
-        f"search_r={SEARCH_RADIUS}px  min_sig={MIN_SIGNAL:.0f}]",
+        f"[LoG thr={LOG_THRESHOLD}  norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
+        f"Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  search_r={SEARCH_RADIUS}px]",
         fontsize=9, fontweight="bold", y=0.99,
     )
     return fig
@@ -658,9 +814,11 @@ def main():
     logger.info("Puncta Anchor Validation Pipeline: START")
     logger.info(f"  Detection : LoG  min_σ={LOG_MIN_SIGMA}  max_σ={LOG_MAX_SIGMA}"
                 f"  threshold={LOG_THRESHOLD}")
-    logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px"
-                f"  min_signal={MIN_SIGNAL:.0f} ADU"
-                f"  min_snr_ratio={MIN_SNR_RATIO:.1f}")
+    logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px")
+    logger.info(f"  Norm thresholds: Ch1≥{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
+                f"Ch2≥{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  "
+                f"Ch3≥{MIN_SIGNAL_NORM['Ch3_AF488']:.1f}  "
+                f"(peak_in_window / nucleus_p25_background)")
     logger.info("=" * 65)
 
     images   = load_all_images()
@@ -689,16 +847,25 @@ def main():
         # ── Step 1: Detect positions in Hyb4 ─────────────────────────────
         positions = detect_positions_hyb4(images["Hyb4"], nucleus_mask)
 
+        # ── Per-nucleus background (computed once, shared by all candidates) ──
+        # nucleus_bg[rnd][ch] = 25th percentile of nucleus pixels = background floor
+        nucleus_bg = compute_nucleus_background(images, labels_shifted_all, nid)
+
         # ── Step 2 & 3: Measure signals in all rounds per candidate ───────
         candidates: list[dict] = []
         for cand_idx, (y_h4, x_h4, sigma, snr) in enumerate(positions):
-            signals      = measure_round_signals(images, regs, y_h4, x_h4)
-            color_h4, max_h4 = call_color(signals["Hyb4"])
-            color_h3, max_h3 = call_color(signals["Hyb3"])
-            color_h2, max_h2 = call_color(signals["Hyb2"])
+            signals = measure_round_signals(images, regs, y_h4, x_h4)
 
-            confirmed_h3 = max_h3 >= MIN_SIGNAL
-            confirmed_h2 = max_h2 >= MIN_SIGNAL
+            # Normalized color calls: max_in_window / nucleus_p25_background
+            color_h4, max_h4, norm_h4 = call_color_normalized(
+                signals["Hyb4"], nucleus_bg["Hyb4"])
+            color_h3, max_h3, norm_h3 = call_color_normalized(
+                signals["Hyb3"], nucleus_bg["Hyb3"])
+            color_h2, max_h2, norm_h2 = call_color_normalized(
+                signals["Hyb2"], nucleus_bg["Hyb2"])
+
+            confirmed_h3 = (color_h3 != "None")
+            confirmed_h2 = (color_h2 != "None")
 
             if confirmed_h3 and confirmed_h2:
                 # Barcode = experimental order: Hyb4 (first imaged) → Hyb3 → Hyb2
@@ -706,14 +873,19 @@ def main():
             else:
                 barcode = "unconfirmed"
 
+            # Per-channel per-round SNR (9 values: 3 channels × 3 rounds)
+            snr_9 = measure_per_channel_snr(
+                images, labels_shifted_all, regs, nid, y_h4, x_h4, sigma
+            )
+
             cand = dict(
                 nucleus_id   = nid,
                 candidate_id = cand_idx + 1,
                 y_h4         = y_h4,
                 x_h4         = x_h4,
                 sigma_h4     = round(sigma, 2),   # LoG scale; blob radius = √2 × sigma
-                snr_h4       = round(snr, 2),      # inside/outside fluorescence ratio
-                # Raw channel signals (useful for threshold-tuning)
+                snr_h4       = round(snr, 2),      # max-proj SNR used for LoG filtering
+                # Raw channel signals (search-window max, ADU)
                 ch1_h4 = signals["Hyb4"]["Ch1_AF647"],
                 ch2_h4 = signals["Hyb4"]["Ch2_AF590"],
                 ch3_h4 = signals["Hyb4"]["Ch3_AF488"],
@@ -723,10 +895,30 @@ def main():
                 ch1_h2 = signals["Hyb2"]["Ch1_AF647"],
                 ch2_h2 = signals["Hyb2"]["Ch2_AF590"],
                 ch3_h2 = signals["Hyb2"]["Ch3_AF488"],
-                # Color calls and confirmation
-                color_h4     = color_h4,  max_h4 = max_h4,
-                color_h3     = color_h3,  max_h3 = max_h3,
-                color_h2     = color_h2,  max_h2 = max_h2,
+                # Per-nucleus per-channel per-round background (p25 of nucleus pixels)
+                bg_ch1_h4 = round(nucleus_bg["Hyb4"]["Ch1_AF647"], 1),
+                bg_ch2_h4 = round(nucleus_bg["Hyb4"]["Ch2_AF590"], 1),
+                bg_ch3_h4 = round(nucleus_bg["Hyb4"]["Ch3_AF488"], 1),
+                bg_ch1_h3 = round(nucleus_bg["Hyb3"]["Ch1_AF647"], 1),
+                bg_ch2_h3 = round(nucleus_bg["Hyb3"]["Ch2_AF590"], 1),
+                bg_ch3_h3 = round(nucleus_bg["Hyb3"]["Ch3_AF488"], 1),
+                bg_ch1_h2 = round(nucleus_bg["Hyb2"]["Ch1_AF647"], 1),
+                bg_ch2_h2 = round(nucleus_bg["Hyb2"]["Ch2_AF590"], 1),
+                bg_ch3_h2 = round(nucleus_bg["Hyb2"]["Ch3_AF488"], 1),
+                # Per-channel per-round SNR (peak-inside / local annulus, 9 values)
+                snr_ch1_h4 = round(snr_9["Hyb4"]["Ch1_AF647"], 2),
+                snr_ch2_h4 = round(snr_9["Hyb4"]["Ch2_AF590"], 2),
+                snr_ch3_h4 = round(snr_9["Hyb4"]["Ch3_AF488"], 2),
+                snr_ch1_h3 = round(snr_9["Hyb3"]["Ch1_AF647"], 2),
+                snr_ch2_h3 = round(snr_9["Hyb3"]["Ch2_AF590"], 2),
+                snr_ch3_h3 = round(snr_9["Hyb3"]["Ch3_AF488"], 2),
+                snr_ch1_h2 = round(snr_9["Hyb2"]["Ch1_AF647"], 2),
+                snr_ch2_h2 = round(snr_9["Hyb2"]["Ch2_AF590"], 2),
+                snr_ch3_h2 = round(snr_9["Hyb2"]["Ch3_AF488"], 2),
+                # Color calls and confirmation (based on normalized threshold)
+                color_h4     = color_h4,  max_h4 = max_h4,  norm_max_h4 = round(norm_h4, 2),
+                color_h3     = color_h3,  max_h3 = max_h3,  norm_max_h3 = round(norm_h3, 2),
+                color_h2     = color_h2,  max_h2 = max_h2,  norm_max_h2 = round(norm_h2, 2),
                 confirmed_h3 = confirmed_h3,
                 confirmed_h2 = confirmed_h2,
                 barcode      = barcode,
