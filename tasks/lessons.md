@@ -244,6 +244,37 @@ xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negativ
 - Clamp to [4, 20] px so circles remain visible regardless of blob size
 - This gives visual feedback on how "spread out" each detected spot is
 
+### Per-nucleus normalized threshold replaces absolute ADU threshold (2026-03-03)
+- **Problem**: absolute `min_signal=300 ADU` ignores cell-to-cell background variation
+  - A dim cell with 200 ADU background might have a real signal at 250 ADU → MISSED
+  - A bright cell with 500 ADU background might have noise at 400 ADU → FALSE POSITIVE
+- **Fix**: `normalized_signal = max_in_window / nucleus_p25_background > threshold`
+  - A ratio of 2.0 = "this spot is 2× brighter than this cell's own baseline" → cell-independent
+  - After normalization, a FIXED ratio threshold IS scientifically valid
+- **p25 as background estimator**: more robust than mean/median because bright puncta pull those up
+- **Per-channel thresholds** needed because mCherry (Ch2) creates diffuse nuclear background:
+  - Ch1/Ch3: threshold ≥ 2.0; Ch2: threshold ≥ 1.5
+- **Result**: 97.4% decoded rate (vs ~100% spurious with old absolute threshold)
+
+### Multi-candidate nuclei: area does NOT predict problem type (2026-03-03)
+- **Hypothesis (wrong)**: multi-candidate = merged cells = larger nuclei
+- **Reality**: multi-candidate nuclei are SMALLER on average
+  - n_cand=1: median area=2019px²;  n_cand≥6: median area=1404px²
+- **Actual cause**: small, bright nuclei → LoG finds many local maxima → false multi-candidate
+  - A 557px² nucleus with 9 candidates is NOT 9 merged cells → it's detection artifact
+- **Rule**: for single-punctum-per-cell biology (HEK barcoding), ANY nucleus with n_confirmed > 1
+  is suspect — do not try to pick the "best" one; flag and exclude from analysis
+
+### LoG is the wrong approach for single-punctum-per-cell biology (2026-03-03)
+- **Problem**: LoG finds ALL blobs above threshold → guaranteed multi-candidate problem
+- **Better approach**: find the SINGLE best peak per nucleus
+  - "Each cell has exactly 1 punctum" is a hard biological constraint → encode it in the algorithm
+  - Find position of max normalized signal → validate that ONE position in HybN
+  - This guarantees 0 or 1 candidate per nucleus by design
+  - "None" rate emerges naturally from the validation step (not from detection threshold tuning)
+- **Lesson for other researchers**: if biology says "1 punctum per cell", DO NOT use multi-blob
+  detection. Use single-peak finding + threshold-based validation instead.
+
 ## QC & Visualization Lessons
 
 ### Spot overlay: vectorise mask coloring with LUT

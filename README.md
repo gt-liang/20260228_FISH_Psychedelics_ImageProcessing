@@ -1,8 +1,8 @@
 # 20260228 FISH Psychedelics Image Processing
 
 **Lab**: Boeynaems Lab, Baylor College of Medicine
-**Status**: ✅ Full pipeline operational — mCherry correction implemented
-**Last Updated**: 2026-03-01
+**Status**: ✅ Modules 1–6 operational | ✅ Puncta Anchor v2 (normalized threshold) | ⏳ Detection redesign planned
+**Last Updated**: 2026-03-03
 
 ---
 
@@ -154,6 +154,8 @@ Downstream analysis should filter on `decoded_ok=True`.
 ├── run_qc_bg_comparison.py         # Before/after background subtraction QC
 ├── run_mcherry_correction.py       # Standalone mCherry cross-round exploration
 ├── run_method_y.py                 # Method Y puncta caller + comparison vs Method X
+├── run_puncta_anchor.py            # Puncta Anchor Pipeline (LoG + cross-round validation)
+├── run_snr_histogram.py            # Per-channel per-round SNR histogram analysis
 │
 ├── tasks/
 │   ├── todo.md                     # Task list + module status
@@ -212,11 +214,40 @@ python run_qc_bg_comparison.py   # Background correction QC
 
 ---
 
+## Puncta Anchor Validation Pipeline (v2)
+
+An independent pixel-level barcode decoder that bypasses Method X/Y's per-round-argmax approach.
+Uses **Hyb4 as anchor round** to detect punctum positions, then cross-validates those positions in Hyb3 and Hyb2.
+
+| Script | Purpose |
+|--------|---------|
+| `run_puncta_anchor.py` | Main pipeline: detect → validate → barcode |
+| `run_snr_histogram.py` | Standalone 3×3 SNR histogram analysis |
+| `config/puncta_anchor.yaml` | All tunable parameters |
+
+**Current results** (log_threshold=0.20, normalized threshold v2):
+- 1198/1230 (97.4%) decoded
+- 969 nuclei with exactly 1 candidate (79%) — ideal
+- Confirmation criterion: `peak_in_window / nucleus_p25_background ≥ 2.0` (Ch1/Ch3), `≥ 1.5` (Ch2)
+
+**Known issue**: 259 nuclei (21%) have >1 candidate — likely small-nucleus detection artifacts
+→ **Planned fix**: replace LoG multi-blob with single-peak detection (see Next Steps)
+
+---
+
 ## Next Steps
 
-- [ ] Puncta detection method cross-comparison (Method X vs Y vs LoG vs TrackPy)
-- [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
+### Immediate (next session)
+- [ ] **Detection redesign**: replace LoG multi-blob → single-best-peak approach
+  - Each nucleus guaranteed 0 or 1 candidate by design (matches biology: 1 punctum/cell)
+  - Algorithm: find max normalized signal position → validate in HybN
+- [ ] Area cutoff for small nucleus exclusion (< 800px² candidates)
+
+### After detection redesign
+- [ ] Compare anchor barcodes vs Module 6 barcodes — agreement rate?
+- [ ] Anchor method as primary decoder vs supplementary QC
 - [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
+- [ ] Map barcodes to drug/condition identity (barcode lookup table)
 - [ ] Per-condition statistics and spatial clustering analysis
 
 ---

@@ -1,6 +1,6 @@
 # FISH Psychedelics Image Processing - Task List
-**Last Updated**: 2026-03-02
-**Status**: Full pipeline + mCherry correction + Puncta Anchor Pipeline (trial run complete) ✅
+**Last Updated**: 2026-03-03
+**Status**: Full pipeline + Puncta Anchor v2 (normalized threshold, 97.4% decoded) ✅ | Detection redesign PENDING ⏳
 
 ---
 
@@ -160,7 +160,7 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 
 ---
 
-## ✅ Completed Today (2026-03-03)
+## ✅ Completed Today (2026-03-03) — Session 1
 
 ### Anchor Pipeline — SNR filter + Variable circle sizes + Threshold calibration
 1. **Added `_compute_snr()`** — peak-inside / mean-outside fluorescence ratio
@@ -179,26 +179,69 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
    | 0.10 | 5.02 | 0 |
    | **0.20** | **1.54** | **2** ← best |
    - **Current setting: `log_threshold: 0.20`** (avg 1.54, 79% of cells have exactly 1 candidate)
-5. **Table**: Added SNR column; barcode string now shown per candidate
-6. **Figure title**: shows `SNR≥{min_snr_ratio}` for parameter traceability
+5. **Per-channel per-round SNR** (9 values) computed and stored in `anchor_candidates.csv`
+6. **`run_snr_histogram.py`** — standalone 3×3 SNR histogram analysis script
+   - Key finding: **Hyb4/Ch1 is the ONLY bimodal channel** — confirms it as dominant Hyb4 color
+   - Ch2 (mCherry) has systematically lower SNR (p90=1.88 vs Ch1 p90=3.99)
 
 ---
 
-## 🔜 Next Session — Scientific Discussion + SNR Implementation
+## ✅ Completed Today (2026-03-03) — Session 2
 
-### Open scientific questions (discuss with PI)
-1. **"None" definition**: When should a nucleus be classified as having NO signal in a given round?
-   - Current: `max(Ch1, Ch2, Ch3) < 300 ADU` → "None"
-   - Alternative: require confirmed punctum in Hyb4 position to be absent in both HybN rounds
-   - Biological question: is "None" meaning "no mRNA" or "undetectable mRNA"?
+### Per-Nucleus Normalized Threshold (replaces absolute 300 ADU)
+7. **Scientific rationale**: fixed ADU threshold ignores cell-to-cell background variation
+   - A ratio threshold (peak / nucleus_bg) is cell-independent: 2.0× means "2× brighter than this cell's own baseline"
+   - This is the correct framework after per-nucleus normalization
+8. **`compute_nucleus_background()`** — 25th percentile of nucleus pixels, per channel × round (9 values)
+   - p25 is robust to puncta bias (mean/median pulled high by bright spots)
+9. **`call_color_normalized()`** — color call using `peak_in_window / nucleus_p25_background`
+   - Per-channel thresholds: Ch1/Ch3 ≥ 2.0, Ch2 ≥ 1.5 (mCherry lower SNR)
+10. **Results with normalized threshold** (log_threshold=0.20, n=1230):
+    - Decoded: **1198/1230 (97.4%)** (up from 100% with false absolute threshold)
+    - 969 nuclei have 1 candidate (79%), 125 have 2, 134 have ≥3
+    - `anchor_candidates.csv` gains 9 bg columns + 3 norm_max columns
 
-2. **SNR threshold strategy** — per-channel or global?
-   - Global: one threshold for all 3 channels
-   - Per-channel: different thresholds for Ch1/Ch2/Ch3 (autofluorescence levels differ)
-   - Method: inspect `snr_h4` distribution in `anchor_candidates.csv` → bimodal?
-   - Suggested approach: plot SNR histogram per channel → identify valley between noise and signal peaks
+### Multi-Candidate Nuclei Analysis
+11. **Key finding**: multi-candidate nuclei are NOT larger — they're smaller on average
+    - n_cand=1: median area=2019px²;  n_cand≥6: median area=1404px²
+    - Small nuclei (<1000px²) with many candidates → likely edge artifacts, not merged cells
+    - 15-candidate nucleus has area=1719px² (normal size!) → detection algorithm issue, not segmentation
+12. **Biological constraint confirmed**: each HEK cell should have exactly 1 punctum
+    - Multi-candidate nuclei are suspect regardless of cause
+    - Two types: small-nucleus artifacts + merged cells (n_cand=2 with normal area)
 
-### After threshold validation
+---
+
+## 🔜 NEXT SESSION — Detection Algorithm Redesign
+
+### Priority 1: Replace LoG multi-blob → single-best-peak approach
+**Problem**: LoG at any threshold finds multiple local maxima per nucleus (especially in small/bright nuclei)
+**Proposed solution**: instead of detecting ALL blobs, find the SINGLE position with highest normalized signal
+
+**New algorithm concept (to discuss + implement)**:
+```
+For each nucleus in Hyb4:
+  1. Compute max_projection(Ch1, Ch2, Ch3) within nucleus mask
+  2. Normalize by nucleus p25 background per channel
+  3. Find the single local maximum with highest normalized signal
+     (use scipy.ndimage.label + peak_local_max with min_distance constraint)
+  4. That one position → validate in Hyb3 + Hyb2
+  5. If validated (norm_signal ≥ threshold in both HybN) → confirmed barcode
+  6. If not validated → "None"
+```
+
+This guarantees:
+- Exactly 0 or 1 candidate per nucleus (by design)
+- No multi-candidate handling needed
+- "None" rate is determined purely by the validation step
+
+### Priority 2: Decide area filter cutoff for small-nucleus exclusion
+- Current: Module 4 allows area ≥ 500 px² (very permissive)
+- Proposal: exclude nuclei with area < 800 px² from analysis
+- Need to verify: how many valid cells would be excluded?
+
+### After detection algorithm is implemented:
+- [ ] Compare new single-peak results vs old LoG results (decoded rate, barcode distribution)
 - [ ] Compare `anchor_summary.csv` barcode vs `module6/barcodes.csv` — agreement rate?
 - [ ] Nuclei where anchor disagrees with Module 6: inspect QC crops
 - [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
