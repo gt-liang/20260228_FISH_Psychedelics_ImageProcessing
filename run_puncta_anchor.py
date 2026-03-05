@@ -63,6 +63,7 @@ import yaml
 from aicsimageio import AICSImage
 from loguru import logger
 from scipy.ndimage import shift as ndimage_shift
+from skimage.feature import blob_log
 from skimage.segmentation import find_boundaries
 
 PROJECT_ROOT = Path(__file__).parent
@@ -77,9 +78,12 @@ SEARCH_RADIUS  = int(_CFG["validation"]["search_radius"])
 FIG_DPI        = int(_CFG["output"].get("figure_dpi", 100))
 SAVE_FIGURES   = bool(_CFG["output"].get("save_figures", True))
 
-# Fixed blob display radius for the per-channel single-peak approach
-# (replaces the LoG sigma that varied per blob; 2.0 px → circle radius = √2×2 ≈ 2.8 px)
-SIGMA_FIXED = 2.0
+# LoG detection parameters (v5 — per-channel, multi-candidate, SNR-filtered)
+LOG_MIN_SIGMA        = float(_CFG["detection"]["min_sigma"])
+LOG_MAX_SIGMA        = float(_CFG["detection"]["max_sigma"])
+LOG_THRESHOLD        = float(_CFG["detection"]["log_threshold"])
+MIN_BLOB_SNR         = float(_CFG["detection"].get("min_blob_snr", 2.0))
+MAX_BLOBS_PER_CH     = int(_CFG["detection"].get("max_blobs_per_channel", 3))
 
 # Per-channel normalized signal threshold: max_in_window / nucleus_p25_background
 _NORM_CFG = _CFG["validation"]["min_signal_normalized"]
@@ -274,39 +278,40 @@ def _compute_snr(image: np.ndarray, mask: np.ndarray,
     return peak_inside / outside_mean
 
 
-# ── Step 1: Hyb4 detection (per-channel argmax) ────────────────────────────
-def detect_best_channel_peak_hyb4(images_hyb4: dict,
-                                   nucleus_mask: np.ndarray,
-                                   nucleus_bg_h4: dict) -> list:
+# ── Step 1: Hyb4 detection (per-channel LoG, multi-candidate, SNR filter) ───
+def detect_per_channel_log_hyb4(images_hyb4: dict,
+                                  nucleus_mask: np.ndarray) -> list:
     """
-    Find the single best punctum position in Hyb4 via per-channel argmax.
+    Run LoG blob detection independently on each Hyb4 channel.
+    Return ALL blobs whose local SNR exceeds MIN_BLOB_SNR.
+    Winner selection is deferred to the cross-round confirmation step in main().
 
     Scientific logic
     ----------------
-    Previous MIP approach bias:
-      max_proj = max(Ch1, Ch2, Ch3) → detects where ANY channel peaks.
-      A bright Yellow pixel at (y1, x1) dominates the MIP even if a larger
-      Purple spot exists at (y2, x2).  We measure Purple at (y1, x1), find it
-      weak there, and incorrectly call Yellow.
+    Per-channel LoG (not MIP): each channel is detected independently so that
+    a bright spot in one channel does not suppress detection in another.
 
-    This function:
-      For EACH channel: find the pixel with highest signal within the nucleus,
-      normalize by that channel's p25 background.
-      The channel with the highest normalized signal wins, and that channel's
-      pixel position is returned as the single candidate.
+    Local SNR filter (peak inside blob / mean of surrounding annulus) removes
+    diffuse background "bumps" (e.g. mCherry nuclear background) that LoG picks
+    up at low threshold.  Background bumps have SNR ≈ 1 (annulus ≈ interior);
+    real diffraction-limited smFISH puncta have SNR >> 1 (sharp peak above
+    surrounding fluorescence).
 
-    Result: color identity and spatial position are always consistent —
-    the position IS where the winning channel is actually strongest.
+    Winner selection (cross-round confirmation):
+    Among all SNR-passing candidates, the one confirmed in the most rounds
+    (Hyb3 + Hyb2) is selected.  Tiebreak: highest total signal across rounds.
+    This makes cross-round biological consistency — not single-round brightness
+    or blob size — the primary decision criterion.
 
     Parameters
     ----------
-    images_hyb4   : {ch: 2D array}  — full-image Hyb4 channels (ADU)
-    nucleus_mask  : bool 2D array   — True = pixels belonging to this nucleus
-    nucleus_bg_h4 : {ch: float}     — per-channel p25 background in Hyb4
+    images_hyb4  : {ch: 2D array}  — full-image Hyb4 channels (ADU)
+    nucleus_mask : bool 2D array   — True = pixels belonging to this nucleus
 
     Returns
     -------
-    List of 0 or 1 tuples: [(y_global, x_global, sigma_fixed, snr_peak)]
+    List of N tuples: [(y_global, x_global, sigma, snr), ...]
+    N = number of blobs passing SNR filter (may be 0 or many).
     """
     ys, xs = np.where(nucleus_mask)
     if len(ys) == 0:
@@ -316,43 +321,47 @@ def detect_best_channel_peak_hyb4(images_hyb4: dict,
     c0, c1 = int(xs.min()), int(xs.max()) + 1
     mask_crop = nucleus_mask[r0:r1, c0:c1]
 
-    # Per-channel: find argmax position and normalized signal within nucleus
-    best_norm = -1.0
-    best_pos  = None   # (y_global, x_global)
+    passing: list[tuple] = []
 
     for ch in CHANNELS:
-        ch_crop = images_hyb4[ch][r0:r1, c0:c1].astype(np.float64)
-        ch_in   = np.where(mask_crop, ch_crop, -1.0)
+        ch_crop  = images_hyb4[ch][r0:r1, c0:c1].astype(np.float64)
+        ch_in    = np.where(mask_crop, ch_crop, 0.0)
+        nuc_vals = ch_crop[mask_crop]
+        if len(nuc_vals) == 0:
+            continue
 
-        max_val = ch_in.max()
-        if max_val < 1.0:
-            continue   # dark channel in this nucleus
+        # Normalize within nucleus pixels (p2/p99.5 stretch → [0, 1])
+        lo = np.percentile(nuc_vals, 2)
+        hi = np.percentile(nuc_vals, 99.5)
+        if hi <= lo:
+            continue
+        norm_crop = np.where(mask_crop,
+                             np.clip((ch_in - lo) / (hi - lo), 0.0, 1.0),
+                             0.0)
 
-        peak_flat      = int(np.argmax(ch_in))
-        y_crop, x_crop = np.unravel_index(peak_flat, ch_in.shape)
+        blobs = blob_log(norm_crop,
+                         min_sigma=LOG_MIN_SIGMA,
+                         max_sigma=LOG_MAX_SIGMA,
+                         threshold=LOG_THRESHOLD,
+                         overlap=0.5)
 
-        bg   = max(nucleus_bg_h4.get(ch, 1.0), 1.0)
-        norm = max_val / bg
+        # Score every in-mask blob by local SNR
+        ch_blobs: list[tuple] = []
+        for blob in blobs:
+            y_c, x_c, sigma = int(blob[0]), int(blob[1]), float(blob[2])
+            if not mask_crop[y_c, x_c]:
+                continue
+            snr = _compute_snr(norm_crop, mask_crop, y_c, x_c,
+                               np.sqrt(2.0) * sigma)
+            if snr < MIN_BLOB_SNR:
+                continue
+            ch_blobs.append((y_c + r0, x_c + c0, sigma, snr))
 
-        if norm > best_norm:
-            best_norm = norm
-            best_pos  = (y_crop + r0, x_crop + c0)
+        # Keep at most MAX_BLOBS_PER_CH highest-SNR blobs per channel
+        ch_blobs.sort(key=lambda b: b[3], reverse=True)
+        passing.extend(ch_blobs[:MAX_BLOBS_PER_CH])
 
-    if best_pos is None or best_norm < 1.0:
-        return []   # no channel has signal above its own background
-
-    # Compute max-projection SNR at the winning position (for recordkeeping)
-    max_proj = np.zeros((r1 - r0, c1 - c0), dtype=np.float64)
-    for ch in CHANNELS:
-        max_proj = np.maximum(max_proj,
-                              images_hyb4[ch][r0:r1, c0:c1].astype(np.float64))
-    max_proj_norm = np.where(mask_crop, max_proj / max(max_proj.max(), 1.0), 0.0)
-    y_local = best_pos[0] - r0
-    x_local = best_pos[1] - c0
-    r_blob  = np.sqrt(2.0) * SIGMA_FIXED
-    snr     = _compute_snr(max_proj_norm, mask_crop, y_local, x_local, r_blob)
-
-    return [(*best_pos, SIGMA_FIXED, snr)]
+    return passing
 
 
 # ── Step 2: Cross-round signal measurement ────────────────────────────────────
@@ -613,10 +622,10 @@ def _draw_puncta_circles(ax, candidates: list, rnd: str,
     for idx, cand in enumerate(candidates):
         y_h4, x_h4 = cand["y_h4"], cand["x_h4"]
 
-        # Circle radius scales with detected blob size: r = √2 × sigma (px)
-        # Clamp to [4, 20] px so circles remain visible on the crop canvas.
+        # Circle radius reflects actual LoG blob size: r = √2 × sigma (px)
+        # Clamp to [2, 15] px so circles remain visible but accurate.
         sigma = cand.get("sigma_h4", 3.0)
-        circle_r = float(np.clip(np.sqrt(2.0) * sigma, 4, 20))
+        circle_r = float(np.clip(np.sqrt(2.0) * sigma, 2, 15))
 
         if rnd == "Hyb4":
             y_plot = y_h4 - r0_req
@@ -829,9 +838,10 @@ def make_nucleus_figure(
     fig.suptitle(
         f"Nucleus {nid}  |  centroid=({cx}, {cy})  |  "
         f"{n_cands} Hyb4 candidate(s)  "
-        f"[per-channel argmax  norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
-        f"Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  abs≥{MIN_ABS_SIGNAL}ADU  "
-        f"search_r={SEARCH_RADIUS}px]",
+        f"[per-ch LoG σ=[{LOG_MIN_SIGMA}–{LOG_MAX_SIGMA}] thr={LOG_THRESHOLD} "
+        f"SNR≥{MIN_BLOB_SNR}  "
+        f"norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f} Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  "
+        f"abs≥{MIN_ABS_SIGNAL}ADU  search_r={SEARCH_RADIUS}px]",
         fontsize=9, fontweight="bold", y=0.99,
     )
     return fig
@@ -841,7 +851,9 @@ def make_nucleus_figure(
 def main():
     logger.info("=" * 65)
     logger.info("Puncta Anchor Validation Pipeline: START")
-    logger.info(f"  Detection : per-channel argmax  sigma_fixed={SIGMA_FIXED}")
+    logger.info(f"  Detection : per-channel LoG  σ=[{LOG_MIN_SIGMA}–{LOG_MAX_SIGMA}]  "
+                f"thr={LOG_THRESHOLD}  SNR≥{MIN_BLOB_SNR}  "
+                f"top{MAX_BLOBS_PER_CH}/ch  multi-candidate")
     logger.info(f"  Validation: search_radius={SEARCH_RADIUS}px  "
                 f"abs_floor={MIN_ABS_SIGNAL}ADU")
     logger.info(f"  Norm thresholds: Ch1≥{MIN_SIGNAL_NORM['Ch1_AF647']:.1f}  "
@@ -873,14 +885,12 @@ def main():
         nid = int(nid)
         nucleus_mask = (labels == nid)
 
-        # ── Per-nucleus background (computed first; detection depends on it) ──
+        # ── Per-nucleus background (used for cross-round confirmation) ──────
         # nucleus_bg[rnd][ch] = 25th percentile of nucleus pixels = background floor
         nucleus_bg = compute_nucleus_background(images, labels_shifted_all, nid)
 
-        # ── Step 1: Detect best punctum position in Hyb4 (per-channel argmax) ──
-        positions = detect_best_channel_peak_hyb4(
-            images["Hyb4"], nucleus_mask, nucleus_bg["Hyb4"]
-        )
+        # ── Step 1: Detect best punctum in Hyb4 (per-channel LoG, size-first) ──
+        positions = detect_per_channel_log_hyb4(images["Hyb4"], nucleus_mask)
 
         # ── Step 2 & 3: Measure signals in all rounds per candidate ───────
         candidates: list[dict] = []

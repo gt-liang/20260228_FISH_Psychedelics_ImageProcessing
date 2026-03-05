@@ -1,61 +1,70 @@
 # Puncta Anchor Validation Pipeline Configuration
 # ================================================
 # Uses Hyb4 as a calibration round:
-#   1. Detect best punctum position in Hyb4 (per-channel argmax — picks the channel
-#      whose normalized peak is highest, then uses that position)
-#   2. Cross-reference each position in Hyb3 + Hyb2 (signal in search_radius window)
+#   1. Detect puncta in Hyb4 (per-channel LoG, SNR filter, multi-candidate)
+#   2. Cross-reference each candidate in Hyb3 + Hyb2 (signal in search_radius window)
 #   3. Validate: peak_in_window / nucleus_p25_background > min_signal_normalized
 #              AND peak_in_window >= min_absolute_signal (absolute floor)
+#   4. Select winner: most rounds confirmed → highest total signal
 #
 # Biological rationale:
 #   smFISH mRNA molecules are spatially fixed between rounds.
 #   Only the probe color changes. A true signal must appear at the same (y, x)
 #   in every round. Anchoring on Hyb4 eliminates noise from other positions.
 #
-# Detection algorithm (v3 — per-channel argmax, replacing LoG-on-MIP):
-#   For each channel independently, find argmax within nucleus mask.
-#   Pick the channel whose (max_val / nucleus_p25_bg) is highest.
-#   Use that channel's peak position as the single candidate position.
-#   Motivation: MIP detection biases toward whichever channel has the highest
-#   peak pixel, even if another channel has a broader/brighter true spot.
+# Detection algorithm (v5 — per-channel LoG, multi-candidate, SNR filter):
+#   Run LoG separately on each channel (Ch1/Purple, Ch2/Blue, Ch3/Yellow).
+#   Normalize each channel within the nucleus mask (p2/p99.5) before LoG.
+#   Keep ALL blobs whose local SNR >= min_blob_snr (peak / annulus mean).
+#   Local SNR rejects diffuse background bumps (e.g. mCherry nuclear bg,
+#   which has SNR ≈ 1) while retaining sharp smFISH puncta (SNR >> 1).
 #
-# Confirmation logic (v3 — dual gate):
+#   Winner selection (after cross-round confirmation):
+#     Among all SNR-passing candidates, pick the one confirmed in the most
+#     rounds (Hyb3 + Hyb2). Tiebreak: highest total signal across rounds.
+#     Cross-round biological consistency is the primary decision criterion.
+#
+#   Nucleus 306 calibration: mCherry blobs had SNR 1.3–2.0; true signals SNR>3.5.
+#   min_blob_snr=2.0 cleanly separates them.
+#
+# Confirmation logic (dual gate):
 #   background = 25th percentile of all nucleus pixels (per channel, per round)
 #   normalized_signal = max_in_search_window / background
 #   confirmed = (normalized_signal >= min_signal_normalized[channel])
 #              AND (max_in_search_window >= min_absolute_signal)
-#   The absolute floor prevents mCherry diffuse background from triggering
-#   false positives when nucleus p25 is very low.
 
 detection:
-  sigma_fixed: 2.0          # Fixed Gaussian sigma for display circle radius.
-                            # Circle radius drawn = sqrt(2) * sigma_fixed ≈ 2.8 px.
+  min_sigma: 1.0          # LoG min blob radius (px)
+  max_sigma: 5.0          # LoG max blob radius (px)
+  log_threshold: 0.20     # Normalized LoG response threshold (raised from 0.10 to
+                          # reduce detections; 0.20 was the calibrated value for MIP
+                          # in v2 and works well per-channel with p2/p99.5 normalization)
+  min_blob_snr: 2.0       # Local SNR filter: peak_inside_blob / annulus_mean >= this.
+                          # Rejects background bumps (SNR≈1); keeps puncta (SNR>2).
+                          # Calibrated on nucleus 306: mCherry blobs SNR 1.3–2.0,
+                          # true smFISH signals SNR > 3.5.
+  max_blobs_per_channel: 3  # After SNR filter, keep at most this many blobs per channel
+                            # (sorted by SNR descending). Cap = 3 → max 9 candidates
+                            # total across 3 channels. Prevents over-detection in noisy
+                            # channels while preserving multi-candidate capability.
 
 validation:
-  search_radius: 3          # Pixel radius window around Hyb4 position to
-                            # search for signal in Hyb3/Hyb2.
-                            # Accounts for residual sub-pixel registration error.
+  search_radius: 3          # Pixel radius window around Hyb4 position to search
+                            # for signal in Hyb3/Hyb2. Accounts for sub-pixel
+                            # registration error.
 
-  min_absolute_signal: 300  # Absolute ADU floor for confirmation.
-                            # A window max below this is always called "None",
-                            # regardless of normalized ratio.
-                            # Prevents mCherry diffuse bg (~200-400 ADU) from
-                            # being amplified to false positive when p25 is low.
+  min_absolute_signal: 300  # Absolute ADU floor for cross-round confirmation.
+                            # Prevents mCherry diffuse bg from triggering false
+                            # positives when nucleus p25 is very low.
 
   min_signal_normalized:
     # Normalized threshold: max_in_window / nucleus_p25_background > threshold
-    # Per-channel because mCherry (Ch2_AF590) creates diffuse nuclear background
-    # that systematically lowers SNR for that channel.
-    #
-    # Calibration basis (snr_summary.csv, n=1895 candidates, v2 pipeline):
-    #   Ch1_AF647: p90=3.99, only bimodal channel — threshold 2.0 separates peaks
-    #   Ch3_AF488: p90=4.49, similar distribution to Ch1
-    #   Ch2_AF590: p90=1.88, mCherry diffuse bg — lower threshold 1.5
+    # Per-channel: mCherry (Ch2_AF590) creates diffuse bg → lower threshold.
     Ch1_AF647: 2.0
     Ch2_AF590: 1.5
     Ch3_AF488: 2.0
 
 output:
   results_dir: "python_results/puncta_anchor"
-  save_figures: true    # Export one QC PNG per nucleus
+  save_figures: true
   figure_dpi: 100
