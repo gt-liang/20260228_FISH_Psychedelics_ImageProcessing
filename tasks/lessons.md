@@ -403,6 +403,60 @@ xr    = max(Ch_corr - xr_bg, 0)                          # clip to 0 (no negativ
 
 ---
 
+## Puncta Anchor v5 Algorithm Lessons (2026-03-04 Session 2)
+
+### Per-channel LoG is correct; argmax and size-first selection fail for different reasons
+
+**v3 argmax failure**: selects the channel with the highest peak/background ratio within nucleus.
+- A small bright pixel (hot pixel, autofluorescence spike) has a HIGHER ratio than a genuine punctum
+  because the signal is concentrated in fewer pixels → inflated peak.
+- Nucleus 306: Purple (SNR 4.93, tiny blob) wins over Yellow (SNR 3.58, genuine smFISH)
+- Rule: never use argmax of brightness as sole criterion — it systematically selects noise over signal
+
+**v4 size-first failure**: largest LoG sigma wins.
+- mCherry diffuse nuclear background creates sigma=5.0 blobs (fills nucleus) that win the size competition.
+- True smFISH puncta: sigma≈1.9 px (sub-diffraction spots); mCherry blobs: sigma=5.0 px
+- Worse: on nucleus 306, Purple and Yellow both had sigma=1.9 — SIZE CANNOT SEPARATE THEM
+- Rule: blob size alone is insufficient when backgrounds create large blobs
+
+**v5 multi-candidate + SNR correct approach**:
+- Detect ALL blobs across all channels that pass local SNR filter (peak/annulus ≥ 2.0)
+- Cross-reference EACH candidate in Hyb3 and Hyb2
+- Winner = candidate confirmed in most rounds; tiebreak by highest total signal
+- This encodes the biological truth: a real mRNA is spatially fixed across all rounds
+
+### Local SNR calibration: mCherry vs smFISH (nucleus 306)
+| Signal type | SNR range |
+|-------------|-----------|
+| mCherry diffuse background blobs | 1.3 – 2.0 |
+| True smFISH puncta | > 3.5 |
+- min_blob_snr=2.0 provides clean separation on this dataset
+- The SNR is computed as: peak_inside_blob / mean_of_surrounding_annulus
+- Use PEAK (not mean) inside blob — smFISH puncta are diffraction-limited single pixels
+
+### multi-candidate winner selection formula
+```python
+confirmed = [c for c in candidates if c["confirmed_h3"] and c["confirmed_h2"]]
+winner = max(confirmed, key=lambda c: c["max_h4"] + c["max_h3"] + c["max_h2"])
+```
+- Require BOTH rounds confirmed — not just one. Single-round confirmation can be coincidental.
+- Among double-confirmed candidates, pick highest total signal (summed across 3 rounds)
+- Never choose by Hyb4 signal alone — Hyb4 is detection round, not validation
+
+### QC figure highlighting: always mark the winner visually
+- Gold solid circle (lw=2.5, ls="-") for winner in ALL rounds (H4, H3, H2)
+- Dashed thin circle (lw=1.2, ls="--") for non-winners
+- "★ Winner: #N Barcode" in suptitle
+- Gold background on winner "#" cell in table
+- Without winner highlighting, QC review with 7+ candidates/nucleus is impractical
+
+### conda environment activation: use full path, not conda run
+- `conda run -n idr-pipeline python script.py` routes to wrong env on this machine (test-env)
+- Always use: `/Users/guo-tengliang/miniconda3/envs/idr-pipeline/bin/python script.py`
+- This is a machine-specific issue with PATH resolution in conda run
+
+---
+
 ## Repo / GitHub
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)

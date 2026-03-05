@@ -621,6 +621,7 @@ def _draw_puncta_circles(ax, candidates: list, rnd: str,
 
     for idx, cand in enumerate(candidates):
         y_h4, x_h4 = cand["y_h4"], cand["x_h4"]
+        is_winner = cand.get("is_winner", False)
 
         # Circle radius reflects actual LoG blob size: r = √2 × sigma (px)
         # Clamp to [2, 15] px so circles remain visible but accurate.
@@ -630,16 +631,23 @@ def _draw_puncta_circles(ax, candidates: list, rnd: str,
         if rnd == "Hyb4":
             y_plot = y_h4 - r0_req
             x_plot = x_h4 - c0_req
-            edge_color = "white"
+            edge_color = "#FFD700" if is_winner else "white"   # gold = winner
         else:
             y_rnd, x_rnd = hybn_position(y_h4, x_h4, dy, dx)
             y_plot = y_rnd - r0_req
             x_plot = x_rnd - c0_req
-            edge_color = "#00EE44" if cand.get(confirmed_key, False) else "#FF3333"
+            if is_winner:
+                edge_color = "#FFD700"   # gold follows winner through all rounds
+            else:
+                edge_color = "#00EE44" if cand.get(confirmed_key, False) else "#FF3333"
+
+        # Winner: solid thick circle; others: dashed thin
+        lw = 2.5 if is_winner else 1.2
+        ls = "-"  if is_winner else "--"
 
         circle = plt.Circle(
             (x_plot, y_plot), radius=circle_r,
-            fill=False, edgecolor=edge_color, linewidth=1.5, zorder=5
+            fill=False, edgecolor=edge_color, linewidth=lw, linestyle=ls, zorder=5
         )
         ax.add_patch(circle)
         ax.text(
@@ -803,8 +811,9 @@ def make_nucleus_figure(
                 "✓" if cand["confirmed_h2"] else "✗",
                 cand["barcode"],
             ]
+            row_id_bg = "#FFD700" if cand.get("is_winner") else "#DDDDDD"  # gold # cell = winner
             c = [
-                "#DDDDDD", "#EEEEEE",
+                row_id_bg, "#EEEEEE",
                 COLOR_DISPLAY.get(cand["color_h4"], "#FFFFFF"), "#EEEEEE", "#EEEEEE",
                 COLOR_DISPLAY.get(cand["color_h3"], "#FFFFFF"), "#EEEEEE",
                 COLOR_DISPLAY.get(cand["color_h2"], "#FFFFFF"), "#EEEEEE",
@@ -835,9 +844,16 @@ def make_nucleus_figure(
                 transform=ax_table.transAxes
             )
 
+    winner = next((c for c in candidates if c.get("is_winner")), None)
+    if winner:
+        w_idx = candidates.index(winner) + 1
+        winner_str = f"  ★ Winner: #{w_idx} {winner['barcode']}"
+    else:
+        winner_str = "  ★ Winner: None"
+
     fig.suptitle(
         f"Nucleus {nid}  |  centroid=({cx}, {cy})  |  "
-        f"{n_cands} Hyb4 candidate(s)  "
+        f"{n_cands} candidate(s){winner_str}  "
         f"[per-ch LoG σ=[{LOG_MIN_SIGMA}–{LOG_MAX_SIGMA}] thr={LOG_THRESHOLD} "
         f"SNR≥{MIN_BLOB_SNR}  "
         f"norm≥Ch1/Ch3:{MIN_SIGNAL_NORM['Ch1_AF647']:.1f} Ch2:{MIN_SIGNAL_NORM['Ch2_AF590']:.1f}  "
@@ -976,6 +992,12 @@ def main():
         else:
             best_barcode = "None"
             decoded_ok   = False
+
+        # Mark winner flag for QC figure highlighting (must happen before figure)
+        for c in candidates:
+            c["is_winner"] = False
+        if confirmed:
+            best["is_winner"] = True
 
         all_summaries.append(dict(
             nucleus_id    = nid,

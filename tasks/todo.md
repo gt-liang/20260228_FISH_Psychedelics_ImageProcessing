@@ -1,6 +1,6 @@
 # FISH Psychedelics Image Processing - Task List
-**Last Updated**: 2026-03-04
-**Status**: Full pipeline ✅ | Puncta Anchor v2 (normalized threshold, 97.4%) ✅ | Group QC analysis ✅ | Detection redesign PENDING ⏳
+**Last Updated**: 2026-03-04 (Session 2)
+**Status**: Full pipeline ✅ | Puncta Anchor v5 (per-ch LoG + SNR + multi-cand, 99.9%) ✅ | Gold winner highlight ✅ | Barcode plot ✅
 
 ---
 
@@ -235,42 +235,50 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 
 ---
 
-## 🔜 NEXT SESSION — Detection Algorithm Redesign
+## ✅ Completed Today (2026-03-04) — Session 2 (Detection Algorithm Redesign)
 
-### Priority 1: Replace LoG multi-blob → single-best-peak approach
-**Problem**: LoG at any threshold finds multiple local maxima per nucleus (especially in small/bright nuclei)
-**Proposed solution**: instead of detecting ALL blobs, find the SINGLE position with highest normalized signal
+### v3 → v4 → v5 Algorithm Evolution
 
-**New algorithm concept (to discuss + implement)**:
-```
-For each nucleus in Hyb4:
-  1. Compute max_projection(Ch1, Ch2, Ch3) within nucleus mask
-  2. Normalize by nucleus p25 background per channel
-  3. Find the single local maximum with highest normalized signal
-     (use scipy.ndimage.label + peak_local_max with min_distance constraint)
-  4. That one position → validate in Hyb3 + Hyb2
-  5. If validated (norm_signal ≥ threshold in both HybN) → confirmed barcode
-  6. If not validated → "None"
-```
+**v3 (per-channel argmax)** — 94.4% decoded
+- Problem: nucleus 306 — Purple selected over Yellow (true signal confirmed all 3 rounds)
+- Root cause: argmax picks bright isolated pixels (noise, hot pixels) over genuine puncta
 
-This guarantees:
-- Exactly 0 or 1 candidate per nucleus (by design)
-- No multi-candidate handling needed
-- "None" rate is determined purely by the validation step
+**v4 (per-channel LoG, size-first selection)** — 78.9% decoded — FAILED
+- Idea: larger sigma = more photons = more likely real signal
+- Root cause: Blue mCherry background blobs sigma=5.0 win the size competition
+- Nucleus 306: Purple and Yellow BOTH sigma=1.9 — size doesn't differentiate them
 
-### Priority 2: Decide area filter cutoff for small-nucleus exclusion
-- Current: Module 4 allows area ≥ 500 px² (very permissive)
-- Proposal: exclude nuclei with area < 800 px² from analysis
-- Need to verify: how many valid cells would be excluded?
+**v5 (per-channel LoG + local SNR filter + multi-candidate winner selection)** — 99.9% ✅
+- Key insight: cross-round biological consistency is primary; SNR + size are secondary
+- SNR calibrated on nucleus 306: mCherry blobs SNR 1.3–2.0; true signals SNR >3.5
+- min_blob_snr=2.0, log_threshold=0.20, top 3/channel, winner = most confirmed rounds → highest total signal
 
-### After detection algorithm is implemented:
-- [ ] Compare new single-peak results vs old LoG results (decoded rate, barcode distribution)
-- [ ] Compare `anchor_summary.csv` barcode vs `module6/barcodes.csv` — agreement rate?
-- [ ] Nuclei where anchor disagrees with Module 6: inspect QC crops
-- [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
-- [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
+### QC Figure Winner Highlighting
+- Gold solid thick circle (lw=2.5) = winner in ALL rows (Hyb4, Hyb3, Hyb2)
+- Dashed thin (lw=1.2) = non-winner candidates (white in H4, green/red in HybN)
+- Suptitle: "★ Winner: #N Barcode" clearly shown
+- Table: gold background on winner row's "#" cell
+- failed_qc/ folder: nucleus_0434.png (only 1 failed cell)
+- barcode_distribution.png: top barcode Yellow-Yellow-Purple (390/1229, 31.7%)
+
+### Results Summary (v5 final)
+| Metric | Value |
+|--------|-------|
+| Total nuclei | 1230 |
+| Decoded | 1229 (99.9%) |
+| Avg candidates/nucleus | 7.28 |
+| Unique barcodes | 20 |
+| Failed QC | 1 (nucleus 434) |
+
+---
+
+## 🔜 NEXT SESSION — Downstream Analysis
+
+- [ ] Compare `anchor_summary.csv` barcodes vs `module6/barcodes.csv` — agreement rate?
 - [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
 - [ ] Per-condition statistics: cell count per barcode, spatial clustering
+- [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
+- [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
 
 ---
 
