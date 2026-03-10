@@ -1,0 +1,21 @@
+detection:
+  log_kernel_size: 1.9       # Big-FISH LoG sigma in pixels (single sigma, not range)
+                              # calibrated from v5 empirical results (blob sigma ~1.9 px)
+  minimum_distance: 3        # minimum spot separation in pixels
+  min_blob_snr: 2.0          # local peak/annulus SNR filter (same as v5)
+  max_blobs_per_channel: 3   # cap per channel before cross-round validation
+
+color_calling:
+  method: "spectral_purity"  # key change vs v5 ("normalized" = signal/p25)
+                              # spectral_purity = best_channel / second_channel
+                              # directly rejects bleedthrough (two channels equal)
+  min_purity: 2.0            # best_channel must be >= 2× second_channel
+  min_absolute_signal: 300   # absolute ADU floor (same as v5)
+
+validation:
+  search_radius: 3           # cross-round position match window (pixels)
+
+output:
+  results_dir: "python_results/puncta_bigfish"
+  save_figures: true
+  figure_dpi: 100
