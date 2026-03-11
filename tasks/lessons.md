@@ -457,6 +457,79 @@ winner = max(confirmed, key=lambda c: c["max_h4"] + c["max_h3"] + c["max_h2"])
 
 ---
 
+## v6 Big-FISH + Spectral Purity Lessons (2026-03-09)
+
+### FISH-quant v2 IS Big-FISH — no separate install needed
+- `pip install big-fish` provides all FISH-quant v2 computational backend
+- FISH-quant is a GUI/napari wrapper only — for pipeline integration, use Big-FISH directly
+- Big-FISH `detect_spots()`: single LoG sigma, auto L-curve elbow threshold, returns (N,2) int64 [y, x]
+
+### Local annulus SNR does NOT fix PSF bleedthrough — spectral purity does
+- **Local annulus SNR approach FAILED** (74.4% decoded):
+  - At bleedthrough position (370,250): AF488 annulus at r=3-6px is CLEAN (no other AF488 nearby)
+    → AF488 local SNR = 69.73. Meanwhile AF647 annulus is POLLUTED by the real Purple spot at 5.83px
+    → AF647 local SNR = 3.69. **Yellow still wins!**
+  - Root cause: PSF bleedthrough creates a genuine localized peak in the wrong channel.
+    Local SNR measures peak/background correctly — but the peak IS real (just in the wrong channel).
+- **Spectral purity approach WORKS** (77.7% decoded):
+  - `purity = best_channel / second_channel`
+  - True spot: one channel dominates (purity >> 2.0, e.g., Purple purity=31.0)
+  - Bleedthrough spot: two channels simultaneously elevated (purity ≈ 1.0, e.g., 1.08)
+  - This is the CORRECT physical test: PSF bleedthrough is spectrally broad (leaks into multiple channels),
+    genuine fluorescence is spectrally narrow (one channel only)
+- **Rule**: for multi-channel smFISH, NEVER use per-channel background normalization to distinguish
+  bleedthrough from real signal. Use spectral purity (ratio of best/second channel) instead.
+
+### p25 background normalization amplifies low-background channels (v5 bug)
+- **The core v5 bug**: `call_color_normalized()` uses `signal / nucleus_p25_background`
+  - AF488 (Yellow) p25 ≈ 336 ADU → ratio = 60496/336 = **180**
+  - AF647 (Purple) p25 ≈ 1072 ADU → ratio = 65520/1072 = **61**
+  - Yellow "wins" even when the Yellow brightness is only PSF bleedthrough from a saturated Purple spot
+- **Root cause**: different fluorophores have different background levels. Normalizing by p25 gives
+  a RELATIVE advantage to low-background channels, regardless of whether the signal is real.
+- **Lesson**: nucleus-wide background statistics (p25, median) are NOT appropriate denominators
+  for color calling in multi-fluorophore experiments. Each channel's background is different.
+
+### Spectral purity threshold calibration
+- `min_purity = 2.0` (best ≥ 2× second) works for this dataset:
+  - True Purple spots: purity median ≈ 15-30 (far above threshold)
+  - True Yellow spots: purity median ≈ 6 (above threshold)
+  - PSF bleedthrough: purity ≈ 1.0 (correctly rejected)
+- At purity ≈ 1.0 (both channels equal), NO threshold can distinguish which channel is "correct"
+  → call "None" and rely on the correct candidate at a different spatial position
+
+### Two distinct problems behind "None" at bleedthrough positions
+1. **Winner selection problem** (14/41 cases): v6 DOES find the correct Purple candidate with
+   purity >> 2.0, but the "None" bleedthrough candidate has higher total signal → wins tiebreak.
+   **Fix**: prefer candidates with valid H4 color over H4=None in winner selection.
+2. **Detection sensitivity problem** (27/41 cases): Big-FISH auto-threshold is too high for some
+   real spots that v5's fixed-threshold LoG found. The true Purple spot exists but isn't detected.
+   **Fix**: lower Big-FISH sensitivity or add fixed-threshold fallback.
+
+### v5 false positive rate: ~10% confirmed by manual QC
+- 250 non-top-5 nuclei QC'd: 124/250 (49.6%) had verdict "none" (no real puncta visible)
+- Dominated by Blue barcodes: Blue-Blue-Blue (39), Blue-Yellow-Blue (12), Blue-Purple-Blue (10)
+- v6 spectral purity correctly filters 115/124 (92.7%) of these false positives
+- **Lesson**: high decoded rate (99.9%) can mask poor precision. Always QC a random sample of
+  non-dominant barcodes to estimate false positive rate.
+
+### Barcode calling bias audit (2026-03-11) — 4 identified biases
+
+| # | Bias | v5 | v6 | Severity |
+|---|---|---|---|---|
+| 1 | p25 normalization amplifies low-bg channels (Yellow 3× advantage) | ⚠️ | ✅ fixed by spectral purity | HIGH |
+| 2 | Ch2 (Blue) lower threshold (1.5× vs 2.0×) | ⚠️ | ✅ fixed (uniform 2.0) | MEDIUM |
+| 3 | Purity ≈ 1.0 at bleedthrough → systematic "None" | N/A | ⚠️ new (but scientifically correct) | LOW |
+| 4 | Winner = brightest total signal → favors saturated bleedthrough over real spot | ⚠️ | ⚠️ still present | HIGH |
+
+- Bias #4 is the remaining problem: at PSF bleedthrough positions, both channels saturate (65520 ADU)
+  → total signal extremely high → bleedthrough candidate wins tiebreak over real candidate with lower signal
+- Proposed fix: `winner_key = (n_non_None_colors, total_signal)` — prefer complete barcodes, then brightness
+- This is NOT introducing new bias — it's encoding the principle that a complete barcode (3 real colors)
+  is more trustworthy than a partial one (None-X-Y), which is a direct consequence of the spectral purity model
+
+---
+
 ## Repo / GitHub
 
 - Repo: `gt-liang/20260228_FISH_Psychedelics_ImageProcessing` (private)

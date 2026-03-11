@@ -272,12 +272,78 @@ Other-channel signals = carry-over from incomplete washing → suppressed by arg
 
 ---
 
-## 🔜 NEXT SESSION — Downstream Analysis
+## ✅ Completed Today (2026-03-09)
 
-- [ ] Compare `anchor_summary.csv` barcodes vs `module6/barcodes.csv` — agreement rate?
+### v6-bigfish Parallel Pipeline — Big-FISH + Spectral Purity Color Calling
+
+**Motivation**: v5 QC review of 250 non-top-5 nuclei revealed:
+- 124 "none" (49.6%) — v5 falsely decoded cells with no real puncta
+- 73 "wrong_winner" (29.2%) — v5 picks Yellow when correct is Purple
+- Root cause: `call_color_normalized()` uses `signal / p25_bg`; AF488 p25≈336 ADU (very low) → ratio inflated 3× → Yellow beats Purple even when Yellow signal is just PSF bleedthrough
+
+**Research phase**:
+- Investigated Big-FISH and FISH-quant v2 in parallel
+- Key finding: FISH-quant v2 IS Big-FISH (same computational backend, FISH-quant is just a GUI wrapper)
+- Installed `big-fish` 0.6.2 via pip
+
+**New files (v5 completely untouched)**:
+1. `run_puncta_bigfish.py` — parallel pipeline with 2 changes from v5:
+   - Detection: `blob_log` (fixed threshold) → Big-FISH `detect_spots()` (auto L-curve threshold)
+   - Color calling: `signal/p25_bg` → **spectral purity** (`best_ch / second_ch ≥ 2.0`)
+2. `config/puncta_bigfish.yaml` — Big-FISH + spectral purity parameters
+3. `compare_v5_v6.py` — CSV comparison + wrong_winner analysis vs manual QC
+4. `plot_barcode_comparison.py` — side-by-side barcode distribution + H4 color pie charts
+
+**Algorithm evolution within session**:
+- v6.1 (local annulus SNR): 74.4% decoded — **FAILED**
+  - Diagnosis: at bleedthrough position (370,250), AF488 has clean annulus → SNR=69.73, but AF647 annulus polluted by real spot at 5.83px → SNR=3.69. Yellow still wins!
+  - Local SNR does NOT fix bleedthrough — the problem is that BOTH channels are elevated
+- v6.2 (spectral purity): **77.7% decoded — IMPLEMENTED**
+  - Key insight: true spot has purity=31.0 (single channel dominates); bleedthrough has purity=1.08 (two channels equal)
+  - `best_channel / second_channel ≥ 2.0` — brightness-invariant, directly catches dual-channel elevation
+
+**Results comparison**:
+
+| Metric | v5 (LoG + normalized) | v6 (Big-FISH + spectral purity) |
+|--------|----------------------|-------------------------------|
+| Raw decoded rate | 99.9% (1229/1230) | 77.7% (956/1230) |
+| Estimated true positive rate | ~90.0% (1107/1230) | ~76.9% (946/1230) |
+| False positives (confirmed by QC) | 124 (10.1%) | ~9 (0.7%) |
+| False positive filter rate | — | 92.7% of v5 FPs correctly rejected |
+
+**Detailed wrong_winner analysis (73 nuclei)**:
+
+| Classification | Count | What happened |
+|----------------|-------|---------------|
+| v6 fully correct (matches user QC) | 18 | Correct barcode recovered |
+| v6 = None at H4, correct = Purple | 41 | H4 anchor at PSF bleedthrough position (purity ≈ 1.0) |
+| v6 = None at H4, correct = Yellow | 8 | Over-rejection of real Yellow |
+| v6 not decoded | 5 | Insufficient candidates |
+| Barcode disagrees | 1 | Independent disagreement |
+
+**Root cause of 41 "None where correct=Purple"**:
+- 14 nuclei: v6 FOUND the correct Purple candidate (purity median=15.88, all >2.0), but winner selection still picks the high-signal "None" candidate (bleedthrough has higher total signal → wins tiebreak)
+- 27 nuclei: Big-FISH auto-threshold didn't even DETECT the true Purple spot (v5's fixed LoG found it)
+
+---
+
+## 🔜 NEXT SESSION — v6 Recall Improvements
+
+### Priority 1: Winner selection fix (14 nuclei)
+- [ ] When H4 = None but another candidate has valid H4 color → prefer the one with real color
+- [ ] Candidates with spectral-pure H4 color should beat "None-X-Y" candidates in tiebreaker
+
+### Priority 2: Big-FISH detection sensitivity (27 nuclei)
+- [ ] Investigate why Big-FISH auto-threshold misses spots that v5 fixed-threshold LoG finds
+- [ ] Option A: lower Big-FISH sensitivity; Option B: fallback to fixed LoG for missed spots
+
+### Priority 3: Top-5 barcode recall (135 nuclei lost from top-5 group)
+- [ ] v6 decoded 846/981 top-5 nuclei (86.2%) — investigate the 135 missed ones
+- [ ] Are these real cells with slightly impure spectral profiles?
+
+### Downstream analysis (after v6 stabilized)
 - [ ] Map barcodes to drug/condition identity (requires barcode lookup table)
 - [ ] Per-condition statistics: cell count per barcode, spatial clustering
-- [ ] Decide if anchor method should REPLACE or SUPPLEMENT Module 6 argmax approach
 - [ ] Cell ID mapping: Live → Hyb4 (Module 7 candidate)
 
 ---
